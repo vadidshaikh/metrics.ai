@@ -131,6 +131,17 @@ class Ledger:
             )
         return row[0]
 
+    def insert_runs(self, runs: list[dict[str, Any]]) -> list[str]:
+        """Batch insert: one connection, one transaction, one `executemany()`."""
+        rows = [self._run_row(run) for run in runs]
+        with self.connect() as conn:
+            conn.executemany(
+                f"INSERT INTO telemetry_runs ({', '.join(RUN_COLUMNS)}) "
+                f"VALUES ({', '.join('?' * len(RUN_COLUMNS))})",
+                rows,
+            )
+        return [row[0] for row in rows]
+
     def runs_for(self, commit_sha: str, command: str | None = None) -> list[dict[str, Any]]:
         sql = "SELECT * FROM telemetry_runs WHERE commit_sha = ?"
         params: list[Any] = [commit_sha]

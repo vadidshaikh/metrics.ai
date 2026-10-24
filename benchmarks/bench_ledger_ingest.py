@@ -1,7 +1,7 @@
 """Dogfood benchmark: ingest 500 telemetry records and AST-profile a real source file.
 
-Baseline (intentionally unoptimized): every record re-parses the sample file's AST and
-is written with its own SQLite connection + commit.
+Optimized: the sample file's AST profile is parsed once via `lru_cache`, and all
+records are written in a single transaction with `Ledger.insert_runs()` (`executemany`).
 """
 
 from __future__ import annotations
@@ -9,23 +9,29 @@ from __future__ import annotations
 import sys
 import tempfile
 import time
+from functools import lru_cache
 from pathlib import Path
 
-from metrics_ai.ast_diff import profile_source
+from metrics_ai.ast_diff import Profile, profile_source
 from metrics_ai.storage import Ledger
 
 RECORDS = 500
 SAMPLE = Path(__file__).resolve().parents[1] / "src" / "metrics_ai" / "collector.py"
 
 
+@lru_cache(maxsize=None)
+def cached_profile(path: Path) -> Profile:
+    return profile_source(path.read_text(encoding="utf-8"))
+
+
 def run(db_path: Path) -> int:
     ledger = Ledger(db_path)
     ledger.init_schema()
     ledger.upsert_commit({"sha": "bench", "message": "benchmark fixture"})
-    source = SAMPLE.read_text(encoding="utf-8")
+    rows = []
     for i in range(RECORDS):
-        profile = profile_source(source)  # re-parses the full AST for every record
-        ledger.insert_run({
+        profile = cached_profile(SAMPLE)
+        rows.append({
             "commit_sha": "bench",
             "command": f"bench::{i}",
             "mean_latency_ms": float(len(profile.functions)),
@@ -33,6 +39,7 @@ def run(db_path: Path) -> int:
             "exit_code": 0,
             "raw_benchmark_json": {"calls": sum(profile.calls.values())},
         })
+    ledger.insert_runs(rows)
     return len(ledger.runs_for("bench"))
 
 

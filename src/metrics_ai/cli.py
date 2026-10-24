@@ -124,8 +124,8 @@ def pytest(ctx: typer.Context) -> None:
     records, exit_code = profiler.run_pytest_benchmark(list(ctx.args), cwd=root)
     for rec in records:
         rec["commit_sha"] = sha
-        ledger.insert_run(rec)
         console.print(telemetry_table(sha, rec))
+    ledger.insert_runs(records)
     if not records:
         console.print("[yellow]No benchmarks found in pytest-benchmark output.[/]")
     raise typer.Exit(exit_code)
