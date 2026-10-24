@@ -7,8 +7,10 @@ from typing import Any
 
 from pydantic import BaseModel, Field, ValidationInfo, model_validator
 
-# Integers/decimals not glued to identifiers (so `SQLite3` is ignored); a trailing `x` is allowed.
-NUMBER_RE = re.compile(r"(?<![A-Za-z0-9_.])(\d+(?:\.\d+)?)(?=x\b|[^A-Za-z0-9_]|$)")
+# Integers/decimals not glued to a preceding identifier (so `SQLite3` is ignored). Trailing units
+# (`160ms`, `5.7x`) are allowed, and a match may never stop part-way through a decimal (`3435.1ms`).
+NUMBER_RE = re.compile(r"(?<![A-Za-z0-9_.])(\d+(?:\.\d+)?)(?!\.?\d)")
+XYZ_MARKERS = ("as measured by", ", by ")
 
 DENSITY_RANGES = {
     "ultra-compact": (1, 114),
@@ -61,6 +63,10 @@ class XyzResponse(BaseModel):
                 f"combined_xyz_bullet contains numbers {bad} that are not in allowed_numbers "
                 f"{sorted(allowed)}. Use measured values verbatim; never round or invent metrics.")
         _check_cited(self.cited_numbers, allowed)
+        missing = [m for m in XYZ_MARKERS if m not in self.combined_xyz_bullet.lower()]
+        if missing:
+            raise ValueError(f"combined_xyz_bullet must follow 'Accomplished [X] as measured by [Y], "
+                             f"by doing [Z]'; missing {missing}.")
         density = ctx.get("density")
         if density in DENSITY_RANGES:
             lo, hi = DENSITY_RANGES[density]

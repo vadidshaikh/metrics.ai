@@ -33,6 +33,7 @@ MECHANISMS = {
     r"connection pool": ["pool"],
     r"generator": ["yield"],
 }
+NOISE_FLOOR_PCT = 5.0
 IDENTIFIER = re.compile(r"`([^`]+)`|\b([A-Za-z]+_[A-Za-z0-9_.]+|[a-z]+[A-Z][A-Za-z]+)\b(?:\(\))?")
 
 
@@ -63,7 +64,8 @@ def triage(state: dict[str, Any]) -> dict[str, Any]:
     elif regression:
         worth = 0.15
     else:
-        worth = 0.30 + 0.45 * min(max(best, 0.0) / 35.0, 1.0) + 0.08 * min(len(signals), 3)
+        # Gains under the 5% noise floor earn nothing; ~15%+ plus structural signals is needed to pass.
+        worth = 0.25 + 0.50 * min(max(best - NOISE_FLOOR_PCT, 0.0) / 30.0, 1.0) + 0.06 * min(len(signals), 3)
     worth = round(min(max(worth, 0.02), 0.97), 3)
 
     if regression:

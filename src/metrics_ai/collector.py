@@ -160,7 +160,9 @@ def build_state(commit: dict[str, Any], base_runs: list[dict[str, Any]],
     cc_b, cc_a = commit.get("cyclomatic_before") or 0.0, commit.get("cyclomatic_after") or 0.0
     ast_diff = commit["ast_diff_json"]
     total = ast_diff.get("total", {})
-    compact_diff = {k: v for k, v in total.items() if v not in ([], {"before": 0, "after": 0})}
+    # Keep only what changed: non-empty lists and before/after counters that actually moved.
+    compact_diff = {k: v for k, v in total.items()
+                    if v != [] and not (isinstance(v, dict) and v.get("before") == v.get("after"))}
     state = {
         "baseline_sha": commit["parent_sha"],
         "target_sha": commit["sha"],

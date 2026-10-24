@@ -32,6 +32,17 @@ def test_number_extraction_ignores_identifiers_and_allows_x_suffix():
     assert extract_numbers("SQLite3 and py311 got 5.7x faster, 82.5% less, 40 MB.") == [5.7, 82.5, 40.0]
 
 
+def test_number_extraction_handles_glued_units_without_truncating_decimals():
+    # Regression: "3435.1ms" used to be read as "3435" and falsely rejected.
+    assert extract_numbers("from 3435.1ms to 160ms, 22.4MB peak") == [3435.1, 160.0, 22.4]
+
+
+def test_validator_rejects_bullet_without_xyz_structure():
+    bullet = "Cut ledger ingest latency by 82.5% from 1234.6 ms to 216.0 ms using executemany batching."
+    with pytest.raises(ValidationError, match="as measured by"):
+        XyzResponse.model_validate(_xyz(bullet), context={"allowed_numbers": ALLOWED})
+
+
 def test_validator_accepts_measured_numbers():
     obj = XyzResponse.model_validate(_xyz(GOOD), context={"allowed_numbers": ALLOWED, "density": "standard"})
     assert obj.cited_numbers == [82.5]

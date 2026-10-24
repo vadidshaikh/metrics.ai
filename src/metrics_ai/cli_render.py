@@ -59,7 +59,10 @@ def discovery_table(report: dict[str, Any]) -> Table:
         table.add_column(col)
     probed = {(c["provider"], c["model"]): c for c in report["probed"]}
     winner = report.get("winner") or {}
-    for i, cand in enumerate(report["candidates"][:12], start=1):
+    shown = report["candidates"][:12]
+    shown += [c for c in report["candidates"][12:] if (c["provider"], c["model"]) in probed]
+    for cand in shown:
+        i = report["candidates"].index(cand) + 1
         p = probed.get((cand["provider"], cand["model"]), cand)
         if (p["provider"], p["model"]) == (winner.get("provider"), winner.get("model")):
             status = "[bold green]LOCKED[/]"

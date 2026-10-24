@@ -31,7 +31,7 @@ def test_tier_scores():
 
 @pytest.mark.parametrize("model_id", ["whisper-large-v3", "playai-tts", "llama-guard-4-12b",
                                       "nomic-embed-text", "llama-3.2-vision", "omni-moderation",
-                                      "bge-reranker", "distil-audio"])
+                                      "bge-reranker", "distil-audio", "canopylabs/orpheus-v1-english"])
 def test_exclusion_filter(model_id):
     assert score_model(model_id) is None
 
@@ -84,6 +84,18 @@ def test_discover_ranks_probes_and_locks(cfg):
     assert report["winner"]["model"] == "Qwen/Qwen3-32B"
     assert cfg["router"]["active_provider"] == "hf"
     assert [f["model"] for f in cfg["router"]["fallback_models"]] == ["llama-3.3-70b-versatile", "gpt-oss-20b"]
+
+
+def test_discover_skips_provider_with_rejected_credentials(cfg):
+    def handler(request):
+        if "/chat/completions" in str(request.url) and "ollama" not in str(request.url) \
+                and "11434" not in str(request.url):
+            return httpx.Response(401, json={"error": "Invalid username or password."})
+        return _router_transport().handle_request(request)
+    report = model_router.discover(cfg, transport=httpx.MockTransport(handler))
+    assert report["winner"]["provider"] == "ollama"
+    assert len(report["probed"]) == 5  # 4 remote failures, then the ollama batch
+    assert any("rejected" in n for n in report["notes"])
 
 
 def test_discover_without_keys_uses_ollama_only():

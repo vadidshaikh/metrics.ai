@@ -122,6 +122,14 @@ def get_secret(cfg: dict[str, Any], name: str) -> str:
     return str(cfg.get("secrets", {}).get(name, "") or "").strip()
 
 
+def shadowed_secrets(cfg: dict[str, Any]) -> list[str]:
+    """Env vars that override a *different* key stored in config.toml."""
+    stored = cfg.get("secrets", {})
+    return [env for name, env in SECRET_ENV.items()
+            if os.environ.get(env, "").strip() and stored.get(name)
+            and os.environ[env].strip() != stored[name]]
+
+
 def store_secrets(root: Path, cfg: dict[str, Any], **secrets: str | None) -> dict[str, Any]:
     """Persist API keys, refusing unless `.metrics/` is git-ignored first."""
     provided = {k: v for k, v in secrets.items() if v}

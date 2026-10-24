@@ -53,8 +53,10 @@ def test_store_secrets_ignores_first_and_env_wins(tmp_path, monkeypatch):
     cfg = config.store_secrets(tmp_path, config.load_config(tmp_path), hf_token="file-token", groq_api_key=None)
     assert config.is_metrics_ignored(tmp_path)
     assert config.get_secret(config.load_config(tmp_path), "hf_token") == "file-token"
+    assert config.shadowed_secrets(cfg) == []
     monkeypatch.setenv("HF_TOKEN", "env-token")
     assert config.get_secret(cfg, "hf_token") == "env-token"
+    assert config.shadowed_secrets(cfg) == ["HF_TOKEN"]
 
 
 def test_find_root_walks_up(tmp_path):

@@ -75,6 +75,9 @@ def auth(groq_key: Optional[str] = typer.Option(None, "--groq-key"),
         if prefer not in {"groq", "hf", "ollama"}:
             raise typer.BadParameter("--prefer must be groq, hf or ollama")
         cfg["providers"]["prefer"] = prefer
+    for env in config.shadowed_secrets(cfg):
+        console.print(f"[yellow]![/] ${env} is set and overrides the key stored in config.toml; "
+                      f"unset it to use the stored key.")
     with console.status("Discovering models…"):
         report = model_router.discover(cfg)
     config.save_config(root, cfg)
@@ -93,8 +96,8 @@ def auth(groq_key: Optional[str] = typer.Option(None, "--groq-key"),
 
 
 def _record_head(ledger: Ledger, root: Path) -> str:
-    repo = collector.open_repo(root)
-    stub = collector.head_stub(repo)
+    with collector.open_repo(root) as repo:
+        stub = collector.head_stub(repo)
     ledger.upsert_commit(stub)
     return stub["sha"]
 
@@ -135,7 +138,8 @@ def pytest(ctx: typer.Context) -> None:
 def capture() -> None:
     """Record AST/complexity for HEAD (used by the post-commit hook)."""
     root, _, ledger = _ctx()
-    ledger.upsert_commit(collector.commit_record(collector.open_repo(root), "HEAD"))
+    with collector.open_repo(root) as repo:
+        ledger.upsert_commit(collector.commit_record(repo, "HEAD"))
 
 
 def _pick_command(ledger: Ledger, base: str, tgt: str, command: Optional[str]) -> Optional[str]:
@@ -162,10 +166,10 @@ def generate(commit: str = typer.Option("HEAD", "--commit", help="Target revisio
     if density not in {"ultra-compact", "standard", "detailed"}:
         raise typer.BadParameter("invalid --density")
     root, cfg, ledger = _ctx()
-    repo = collector.open_repo(root)
-    tgt = collector.resolve_sha(repo, commit)
-    base = collector.resolve_sha(repo, baseline or f"{tgt}~1")
-    record = collector.commit_record(repo, tgt, base)
+    with collector.open_repo(root) as repo:
+        tgt = collector.resolve_sha(repo, commit)
+        base = collector.resolve_sha(repo, baseline or f"{tgt}~1")
+        record = collector.commit_record(repo, tgt, base)
     ledger.upsert_commit(record)
     cmd = _pick_command(ledger, base, tgt, command)
     base_runs = ledger.runs_for(base, cmd)[-1:] if cmd else []
@@ -203,13 +207,15 @@ def generate(commit: str = typer.Option("HEAD", "--commit", help="Target revisio
         with console.status("No model locked yet; running discovery…"):
             model_router.discover(cfg)
         config.save_config(root, cfg)
+    failed = []
     for target_role in route_roles(triage.role_distribution, role):
         try:
             result = synthesize(cfg, gate, state, allowed, fmt, target_role, density,
                                 log=lambda m: console.print(f"[dim]{m}[/]"))
         except (SynthesisError, model_router.ProviderUnavailable) as exc:
             console.print(f"[red]{target_role}: {exc}[/]")
-            raise typer.Exit(1)
+            failed.append(target_role)
+            continue
         digest = ledger_hash(state, result.output_text)
         ledger.insert_impact({**base_row, "role": target_role,
                               "jev_role_prob": triage.role_distribution.get(target_role),
@@ -221,6 +227,9 @@ def generate(commit: str = typer.Option("HEAD", "--commit", help="Target revisio
             f"{result.provider}/{result.model} · faithful={result.faithful_prob:.2f} ({result.faithful_source})"
             f" · attempts={result.attempts} · hash={digest[:12]}"))
         console.print(json.dumps({"role": target_role, "cited_numbers": result.structured["cited_numbers"]}))
+    if failed:
+        console.print(f"[red]No verified artifact for: {', '.join(failed)}[/]")
+        raise typer.Exit(1)
 
 
 @app.command()

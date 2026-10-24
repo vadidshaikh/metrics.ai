@@ -64,8 +64,13 @@ def test_wrap_then_generate_pr_md(repo, monkeypatch):
 
 
 def test_generate_halts_below_gate_and_logs(repo, monkeypatch):
-    root = _wrap_both(repo, monkeypatch)
-    # `python -c pass` shows no real speedup, so the offline gate must halt synthesis.
+    root = Path(repo.working_dir)
+    # A comment-only commit has no structural change, so the gate must halt whatever the timing noise.
+    with (root / "ingest.py").open("a", encoding="utf-8") as fh:
+        fh.write("# docs: clarify ingest\n")
+    repo.index.add(["ingest.py"])
+    repo.index.commit("docs: comment only")
+    _wrap_both(repo, monkeypatch)
     result = runner.invoke(app, ["generate", "--format", "xyz"])
     assert result.exit_code == 0, result.output
     assert "Synthesis halted" in result.output

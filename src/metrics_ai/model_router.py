@@ -15,7 +15,8 @@ from metrics_ai.config import get_secret
 
 GROQ_BASE = "https://api.groq.com/openai/v1"
 HF_BASE = "https://router.huggingface.co/v1"
-EXCLUDE = ("whisper", "tts", "guard", "embed", "vision", "audio", "moderation", "rerank")
+EXCLUDE = ("whisper", "tts", "guard", "embed", "vision", "audio", "moderation", "rerank",
+           "orpheus")  # orpheus: Groq's text-to-speech family, not caught by "tts"
 # Ordered preference tiers: (glob over the lower-cased model basename, score).
 TIERS = [
     ("qwen3-coder*", 100), ("qwen2.5-coder*", 97), ("gpt-oss-120b", 95),
@@ -28,6 +29,9 @@ DEFAULT_SCORE = 40
 HF_STRUCTURED_BONUS = 5
 PROBE_TOP_N = 4
 PROBE_TIMEOUT_S = 4.0
+MAX_PROBE_BATCHES = 3
+# Provider-level rejections (bad key, no credits, forbidden): no model on that provider will pass.
+AUTH_FAILURES = {"HTTP 401", "HTTP 402", "HTTP 403"}
 RETRYABLE = {429, 500, 502, 503, 504}
 
 
@@ -131,9 +135,23 @@ def discover(cfg: dict[str, Any], transport: httpx.BaseTransport | None = None) 
     with httpx.Client(transport=transport) as client:
         candidates, notes = enumerate_models(cfg, client)
         ranked = rank(candidates, cfg["providers"].get("prefer", ""))
-        top = ranked[:PROBE_TOP_N]
-        with ThreadPoolExecutor(max_workers=PROBE_TOP_N) as pool:
-            list(pool.map(lambda c: probe(cfg, c, client), top))
+        top: list[Candidate] = []
+        dead: set[str] = set()
+        # Probe the top 4; if none pass, move to the next 4 (skipping providers that rejected
+        # our credentials) so a broken key on one provider cannot block a healthy one.
+        for _batch in range(MAX_PROBE_BATCHES):
+            batch = [c for c in ranked if c not in top and c.provider not in dead][:PROBE_TOP_N]
+            if not batch:
+                break
+            with ThreadPoolExecutor(max_workers=PROBE_TOP_N) as pool:
+                list(pool.map(lambda c: probe(cfg, c, client), batch))
+            top += batch
+            if any(c.probe_ok for c in batch):
+                break
+            for provider in {c.provider for c in batch}:
+                if all(c.note in AUTH_FAILURES for c in batch if c.provider == provider):
+                    dead.add(provider)
+                    notes.append(f"{provider}: credentials/billing rejected (HTTP 401/402/403); skipping provider")
     passing = [c for c in top if c.probe_ok]
     router = cfg.setdefault("router", {})
     if passing:
@@ -153,7 +171,7 @@ def model_chain(cfg: dict[str, Any]) -> list[tuple[str, str]]:
 
 
 def chat(cfg: dict[str, Any], messages: list[dict[str, str]], start_index: int = 0,
-         transport: httpx.BaseTransport | None = None, max_tokens: int = 2000) -> tuple[str, str, str, int]:
+         transport: httpx.BaseTransport | None = None, max_tokens: int = 4000) -> tuple[str, str, str, int]:
     """Run a chat completion, failing over on 429/5xx. Returns (provider, model, text, chain index)."""
     chain = model_chain(cfg)
     if not chain:
