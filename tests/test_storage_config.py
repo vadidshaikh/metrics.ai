@@ -1,0 +1,64 @@
+from __future__ import annotations
+
+import sqlite3
+
+import pytest
+
+from metrics_ai import config
+from metrics_ai.storage import Ledger
+
+
+def test_schema_and_round_trip(tmp_path):
+    ledger = Ledger(tmp_path / ".metrics" / "ledger.db")
+    ledger.init_schema()
+    ledger.upsert_commit({"sha": "abc", "parent_sha": "p", "message": "m", "ast_diff_json": {"signals": []},
+                          "files_modified_json": ["a.py"], "cyclomatic_before": 2.0, "cyclomatic_after": 1.5,
+                          "loc_delta": -3})
+    ledger.upsert_commit({"sha": "abc", "message": "updated"})  # partial update keeps other columns
+    commit = ledger.get_commit("abc")
+    assert commit["message"] == "updated" and commit["loc_delta"] == -3
+    run_id = ledger.insert_run({"commit_sha": "abc", "command": "c", "mean_latency_ms": 1.5,
+                                "peak_memory_mb": 2.0, "exit_code": 0, "raw_benchmark_json": {"runs": []}})
+    assert ledger.runs_for("abc", "c")[0]["run_id"] == run_id
+    assert ledger.runs_for("abc", "other") == []
+    ledger.insert_impact({"baseline_sha": "p", "target_sha": "abc", "output_text": "x", "structured_json": {}})
+    dump = ledger.dump()
+    assert [len(dump[t]) for t in ("commits", "telemetry_runs", "synthesized_impacts")] == [1, 1, 1]
+
+
+def test_foreign_key_enforced(tmp_path):
+    ledger = Ledger(tmp_path / "l.db")
+    ledger.init_schema()
+    with pytest.raises(sqlite3.IntegrityError):
+        ledger.insert_run({"commit_sha": "missing", "command": "c"})
+
+
+def test_config_defaults_save_and_merge(tmp_path):
+    cfg = config.load_config(tmp_path)
+    assert cfg["jev"]["model"] == "typesafe/jev-1.13.0"
+    cfg["router"]["active_model"] = "m"
+    config.save_config(tmp_path, cfg)
+    assert config.load_config(tmp_path)["router"]["active_model"] == "m"
+    assert config.load_config(tmp_path)["jev"]["worthy_threshold"] == 0.60
+
+
+def test_gitignore_safety(tmp_path):
+    (tmp_path / ".gitignore").write_text("node_modules", encoding="utf-8")
+    assert config.ensure_gitignore(tmp_path) is True
+    assert config.ensure_gitignore(tmp_path) is False
+    assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == "node_modules\n.metrics/\n"
+
+
+def test_store_secrets_ignores_first_and_env_wins(tmp_path, monkeypatch):
+    cfg = config.store_secrets(tmp_path, config.load_config(tmp_path), hf_token="file-token", groq_api_key=None)
+    assert config.is_metrics_ignored(tmp_path)
+    assert config.get_secret(config.load_config(tmp_path), "hf_token") == "file-token"
+    monkeypatch.setenv("HF_TOKEN", "env-token")
+    assert config.get_secret(cfg, "hf_token") == "env-token"
+
+
+def test_find_root_walks_up(tmp_path):
+    (tmp_path / ".metrics").mkdir()
+    nested = tmp_path / "a" / "b"
+    nested.mkdir(parents=True)
+    assert config.find_root(nested) == tmp_path.resolve()

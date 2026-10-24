@@ -1,0 +1,77 @@
+name: "metrics.ai telemetry delta"
+description: "Profile a command on the PR base and head commits and publish a metrics.ai Markdown delta table."
+branding:
+  icon: "activity"
+  color: "blue"
+
+inputs:
+  command:
+    description: "Command to profile on both commits (e.g. `python benchmarks/bench_ledger_ingest.py`)."
+    required: true
+  base-sha:
+    description: "Baseline commit (defaults to the PR base SHA)."
+    required: false
+    default: ""
+  runs:
+    description: "Repetitions per commit; latency is the mean."
+    required: false
+    default: "3"
+  python-version:
+    description: "Python version used to run metrics.ai."
+    required: false
+    default: "3.12"
+  package-spec:
+    description: "pip install spec for metrics.ai."
+    required: false
+    default: "metrics-ai"
+
+outputs:
+  markdown:
+    description: "The rendered Markdown delta table."
+    value: ${{ steps.generate.outputs.markdown }}
+
+runs:
+  using: "composite"
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install metrics.ai
+      shell: bash
+      run: python -m pip install "${{ inputs.package-spec }}"
+
+    - name: Profile base and head
+      shell: bash
+      env:
+        BASE_SHA: ${{ inputs.base-sha || github.event.pull_request.base.sha }}
+        METRICS_CMD: ${{ inputs.command }}
+        METRICS_RUNS: ${{ inputs.runs }}
+      run: |
+        set -euo pipefail
+        HEAD_SHA="$(git rev-parse HEAD)"
+        echo "HEAD_SHA=$HEAD_SHA" >> "$GITHUB_ENV"
+        echo "BASE_SHA=$BASE_SHA" >> "$GITHUB_ENV"
+        metrics init
+        git checkout --quiet "$BASE_SHA"
+        metrics wrap "$METRICS_CMD" --runs "$METRICS_RUNS"
+        git checkout --quiet "$HEAD_SHA"
+        metrics wrap "$METRICS_CMD" --runs "$METRICS_RUNS"
+
+    - name: Generate PR Markdown
+      id: generate
+      shell: bash
+      env:
+        METRICS_CMD: ${{ inputs.command }}
+      run: |
+        set -euo pipefail
+        metrics generate --format pr-md --commit "$HEAD_SHA" --baseline "$BASE_SHA" \
+          --command "$METRICS_CMD" > metrics-generate.log
+        # The raw Markdown block starts at the table heading printed by the deterministic renderer.
+        sed -n '/^### metrics.ai telemetry delta/,$p' metrics-generate.log > metrics-delta.md
+        cat metrics-delta.md >> "$GITHUB_STEP_SUMMARY"
+        {
+          echo "markdown<<METRICS_EOF"
+          cat metrics-delta.md
+          echo "METRICS_EOF"
+        } >> "$GITHUB_OUTPUT"
