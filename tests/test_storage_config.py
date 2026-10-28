@@ -35,7 +35,8 @@ def test_foreign_key_enforced(tmp_path):
 
 def test_config_defaults_save_and_merge(tmp_path):
     cfg = config.load_config(tmp_path)
-    assert cfg["jev"]["model"] == "typesafe/jev-1.13.0"
+    assert cfg["jev"]["model"] == "jev-1.13.0"
+    assert cfg["jev"]["endpoint"] == "https://api.typesafe.ai/v1/systemone"
     cfg["router"]["active_model"] = "m"
     config.save_config(tmp_path, cfg)
     assert config.load_config(tmp_path)["router"]["active_model"] == "m"
@@ -64,3 +65,20 @@ def test_find_root_walks_up(tmp_path):
     nested = tmp_path / "a" / "b"
     nested.mkdir(parents=True)
     assert config.find_root(nested) == tmp_path.resolve()
+
+
+def test_legacy_jev_defaults_are_upgraded_on_load(tmp_path):
+    cfg = config.load_config(tmp_path)
+    cfg["jev"].update(endpoint="https://jevmodel.net/v1/systemone", model="typesafe/jev-1.13.0",
+                      faithful_threshold=0.75)
+    config.save_config(tmp_path, cfg)
+    loaded = config.load_config(tmp_path)["jev"]
+    assert (loaded["endpoint"], loaded["model"], loaded["faithful_threshold"]) ==         ("https://api.typesafe.ai/v1/systemone", "jev-1.13.0", 0.80)
+
+
+def test_typesafe_key_env_takes_precedence(monkeypatch, tmp_path):
+    cfg = config.load_config(tmp_path)
+    monkeypatch.setenv("JEV_API_KEY", "jev")
+    assert config.get_secret(cfg, "jev_api_key") == "jev"
+    monkeypatch.setenv("TYPESAFE_API_KEY", "ts")
+    assert config.get_secret(cfg, "jev_api_key") == "ts"

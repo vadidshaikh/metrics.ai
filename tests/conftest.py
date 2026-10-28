@@ -40,8 +40,12 @@ TARGET_SRC = textwrap.dedent('''
 
 @pytest.fixture(autouse=True)
 def _isolate_env(monkeypatch):
-    for var in ("GROQ_API_KEY", "HF_TOKEN", "JEV_API_KEY"):
+    from metrics_ai.config import DEFAULT_CONFIG
+
+    for var in ("GROQ_API_KEY", "HF_TOKEN", "JEV_API_KEY", "TYPESAFE_API_KEY"):
         monkeypatch.delenv(var, raising=False)
+    # Never let a test reach a real local Ollama: port 9 (discard) refuses connections immediately.
+    monkeypatch.setitem(DEFAULT_CONFIG["providers"], "ollama_url", "http://127.0.0.1:9")
 
 
 @pytest.fixture
@@ -67,7 +71,8 @@ def make_state(latency=(1000.0, 250.0), memory=(50.0, 40.0), signals=("batched_o
 
     runs_b = [{"mean_latency_ms": latency[0], "peak_memory_mb": memory[0], "exit_code": 0}]
     runs_t = [{"mean_latency_ms": latency[1], "peak_memory_mb": memory[1], "exit_code": 0}]
-    diff = {"signals": list(signals), "batching_calls_added": ["executemany"]} if signals else {}
+    diff = {"signals": list(signals), "batching_calls_added": ["executemany"],
+            "mechanisms": ["batched database writes into one transaction via executemany()"]} if signals else {}
     diff.update(extra_diff or {})
     return {
         "baseline_sha": "a" * 40, "target_sha": "b" * 40, "command": "python bench.py",

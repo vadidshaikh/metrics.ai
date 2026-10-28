@@ -71,11 +71,32 @@ def test_generate_halts_below_gate_and_logs(repo, monkeypatch):
     repo.index.add(["ingest.py"])
     repo.index.commit("docs: comment only")
     _wrap_both(repo, monkeypatch)
-    result = runner.invoke(app, ["generate", "--format", "xyz"])
+    result = runner.invoke(app, ["generate", "--format", "xyz", "--offline-no-llm"])
     assert result.exit_code == 0, result.output
     assert "Synthesis halted" in result.output
     impact = Ledger(root / ".metrics" / "ledger.db").dump()["synthesized_impacts"][0]
     assert "halted" in json.loads(impact["structured_json"])
+    assert impact["gate_mode"] == "offline_heuristic"
+
+
+def test_generate_without_any_provider_falls_back_to_offline_gate(repo, monkeypatch):
+    root = _wrap_both(repo, monkeypatch)
+    result = runner.invoke(app, ["generate", "--format", "pr-md"])
+    assert result.exit_code == 0, result.output
+    assert "gate_mode: offline_heuristic" in result.output
+    assert Ledger(root / ".metrics" / "ledger.db").dump()["synthesized_impacts"][0]["gate_mode"] == "offline_heuristic"
+
+
+def test_prune_command(repo, monkeypatch):
+    root = _wrap_both(repo, monkeypatch)
+    assert runner.invoke(app, ["wrap", CMD, "--runs", "1"]).exit_code == 0  # a superseded run on HEAD
+    assert runner.invoke(app, ["prune"]).exit_code != 0
+    result = runner.invoke(app, ["prune", "--keep-latest"])
+    assert result.exit_code == 0 and "VACUUM" in result.output
+    ledger = Ledger(root / ".metrics" / "ledger.db")
+    assert ledger.counts()["telemetry_runs"] == 2
+    assert runner.invoke(app, ["prune", "--all"]).exit_code == 0
+    assert ledger.counts() == {"commits": 0, "telemetry_runs": 0, "synthesized_impacts": 0}
 
 
 def test_generate_rejects_bad_format(repo, monkeypatch):
@@ -105,3 +126,17 @@ def test_dashboard_serves_ledger_and_html(repo, monkeypatch):
 def test_dashboard_missing_ledger_returns_empty(tmp_path):
     data = _get(create_app(tmp_path / "none.db"), "/api/ledger").json()
     assert data == {"commits": [], "telemetry_runs": [], "synthesized_impacts": []}
+
+
+def test_jev_request_prints_playground_body_and_response_is_accepted(repo, monkeypatch, tmp_path):
+    _wrap_both(repo, monkeypatch)
+    out = tmp_path / "triage.json"
+    result = runner.invoke(app, ["jev-request", "--out", str(out)])
+    assert result.exit_code == 0, result.output
+    body = json.loads(out.read_text(encoding="utf-8"))
+    assert set(body) == {"model", "state", "questions"} and body["questions"]["impact_tier"]["type"] == "score"
+    reply = tmp_path / "reply.json"
+    reply.write_text(json.dumps({"is_resume_worthy": {"probability": 0.1}, "impact_tier": {"score": 0.2},
+                                 "best_fit_role": {"distribution": {"backend": 1.0}}}), encoding="utf-8")
+    result = runner.invoke(app, ["generate", "--format", "xyz", "--jev-response", str(reply)])
+    assert "gate_mode: jev_api" in result.output and "Synthesis halted" in result.output

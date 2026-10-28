@@ -20,20 +20,21 @@ CONFIG_FILE = "config.toml"
 LEDGER_FILE = "ledger.db"
 GITIGNORE_ENTRY = ".metrics/"
 
-# Environment variables always win over values persisted in config.toml.
+# Environment variables always win over values persisted in config.toml (first match wins).
 SECRET_ENV = {
-    "groq_api_key": "GROQ_API_KEY",
-    "hf_token": "HF_TOKEN",
-    "jev_api_key": "JEV_API_KEY",
+    "groq_api_key": ("GROQ_API_KEY",),
+    "hf_token": ("HF_TOKEN",),
+    "jev_api_key": ("TYPESAFE_API_KEY", "JEV_API_KEY"),
 }
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "jev": {
-        "endpoint": "https://jevmodel.net/v1/systemone",
-        "model": "typesafe/jev-1.13.0",
+        "endpoint": "https://api.typesafe.ai/v1/systemone",
+        "model": "jev-1.13.0",
         "timeout_s": 8.0,
         "worthy_threshold": 0.60,
-        "faithful_threshold": 0.75,
+        "faithful_threshold": 0.80,
+        "natural_threshold": 0.80,
     },
     "providers": {
         "prefer": "",
@@ -46,6 +47,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "fallback_models": [],
         "discovered_at": 0,
     },
+}
+
+
+# Old defaults persisted by earlier versions; upgraded transparently on load.
+LEGACY_DEFAULTS = {
+    ("jev", "endpoint"): ("https://jevmodel.net/v1/systemone", "https://api.typesafe.ai/v1/systemone"),
+    ("jev", "model"): ("typesafe/jev-1.13.0", "jev-1.13.0"),
+    ("jev", "faithful_threshold"): (0.75, 0.80),
 }
 
 
@@ -85,7 +94,11 @@ def load_config(root: Path) -> dict[str, Any]:
     if not path.exists():
         return copy.deepcopy(DEFAULT_CONFIG)
     with path.open("rb") as fh:
-        return _merge(DEFAULT_CONFIG, tomllib.load(fh))
+        cfg = _merge(DEFAULT_CONFIG, tomllib.load(fh))
+    for (section, key), (old, new) in LEGACY_DEFAULTS.items():
+        if cfg.get(section, {}).get(key) == old:
+            cfg[section][key] = new
+    return cfg
 
 
 def save_config(root: Path, cfg: dict[str, Any]) -> Path:
@@ -115,8 +128,12 @@ def ensure_gitignore(root: Path) -> bool:
     return True
 
 
+def _env_secret(name: str) -> str:
+    return next((os.environ[v].strip() for v in SECRET_ENV[name] if os.environ.get(v, "").strip()), "")
+
+
 def get_secret(cfg: dict[str, Any], name: str) -> str:
-    env_value = os.environ.get(SECRET_ENV[name], "").strip()
+    env_value = _env_secret(name)
     if env_value:
         return env_value
     return str(cfg.get("secrets", {}).get(name, "") or "").strip()
@@ -125,9 +142,12 @@ def get_secret(cfg: dict[str, Any], name: str) -> str:
 def shadowed_secrets(cfg: dict[str, Any]) -> list[str]:
     """Env vars that override a *different* key stored in config.toml."""
     stored = cfg.get("secrets", {})
-    return [env for name, env in SECRET_ENV.items()
-            if os.environ.get(env, "").strip() and stored.get(name)
-            and os.environ[env].strip() != stored[name]]
+    shadowed = []
+    for name, envs in SECRET_ENV.items():
+        active = next((v for v in envs if os.environ.get(v, "").strip()), None)
+        if active and stored.get(name) and os.environ[active].strip() != stored[name]:
+            shadowed.append(active)
+    return shadowed
 
 
 def store_secrets(root: Path, cfg: dict[str, Any], **secrets: str | None) -> dict[str, Any]:

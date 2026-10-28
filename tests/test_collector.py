@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 
 from metrics_ai import collector, profiler
-from metrics_ai.ast_diff import diff_profiles, profile_source, structural_signals
+from metrics_ai.ast_diff import diff_profiles, identifiers, mechanisms, profile_source, structural_signals
 from tests.conftest import BASELINE_SRC, TARGET_SRC, make_state
 
 
@@ -99,3 +99,22 @@ def test_parse_benchmark_json():
     assert rec["command"] == "pytest::tests/test_x.py::test_a"
     assert rec["mean_latency_ms"] == 2.0 and rec["throughput_items_sec"] == 500.0
     assert rec["raw_benchmark_json"]["stddev_ms"] == 0.1
+
+
+def test_mechanisms_are_distinct_items():
+    diff = diff_profiles(profile_source(BASELINE_SRC), profile_source(TARGET_SRC))
+    items = mechanisms({**diff, "decorators_added": ["ingest.py::parse@lru_cache"]})
+    assert items[0] == "batched database writes into one transaction via executemany()"
+    assert "cached repeated parse() results in memory with @lru_cache" in items
+    assert any(i.startswith("moved per-iteration") and "commit()" in i for i in items)
+    assert len(items) == len(set(items)) >= 3
+
+
+def test_build_state_exposes_mechanisms_and_identifiers(repo):
+    record = collector.commit_record(repo, "HEAD")
+    runs = [{"mean_latency_ms": 10.0, "peak_memory_mb": 5.0, "exit_code": 0}]
+    state = collector.build_state(record, runs, runs, "cmd")
+    assert any("executemany()" in m for m in state["ast_structural_diff"]["mechanisms"])
+    idents = collector.state_identifiers(state)
+    assert {"executemany", "lru_cache", "ingest.py"} <= idents
+    assert identifiers({}, ["a/b/long_name.py"]) == {"long_name.py", "long_name"}

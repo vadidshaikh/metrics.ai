@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fnmatch
+import json
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -171,7 +172,8 @@ def model_chain(cfg: dict[str, Any]) -> list[tuple[str, str]]:
 
 
 def chat(cfg: dict[str, Any], messages: list[dict[str, str]], start_index: int = 0,
-         transport: httpx.BaseTransport | None = None, max_tokens: int = 4000) -> tuple[str, str, str, int]:
+         transport: httpx.BaseTransport | None = None, max_tokens: int = 4000,
+         temperature: float = 0.2) -> tuple[str, str, str, int]:
     """Run a chat completion, failing over on 429/5xx. Returns (provider, model, text, chain index)."""
     chain = model_chain(cfg)
     if not chain:
@@ -180,7 +182,7 @@ def chat(cfg: dict[str, Any], messages: list[dict[str, str]], start_index: int =
     with httpx.Client(transport=transport, timeout=120.0) as client:
         for index in range(start_index, len(chain)):
             provider, model = chain[index]
-            body = {"model": model, "messages": messages, "temperature": 0.2, "max_tokens": max_tokens}
+            body = {"model": model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens}
             try:
                 resp = client.post(f"{base_url(provider, cfg)}/chat/completions", json=body,
                                    headers=_headers(provider, cfg))
@@ -194,3 +196,13 @@ def chat(cfg: dict[str, Any], messages: list[dict[str, str]], start_index: int =
             content = resp.json()["choices"][0]["message"].get("content") or ""
             return provider, model, content, index
     raise ProviderUnavailable("All models failed: " + "; ".join(errors))
+
+
+def parse_json(text: str) -> dict[str, Any]:
+    """Extract the JSON object from a model reply (tolerates <think> blocks and code fences)."""
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    text = re.sub(r"```(?:json)?", "", text).strip()
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        raise json.JSONDecodeError("no JSON object found", text, 0)
+    return json.loads(text[start:end + 1])

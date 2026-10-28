@@ -1,4 +1,4 @@
-"""Pydantic v2 structured-output schemas with the numeric hallucination blocker."""
+"""Pydantic v2 structured-output schemas: numeric hallucination blocker + prose linter."""
 
 from __future__ import annotations
 
@@ -7,20 +7,21 @@ from typing import Any
 
 from pydantic import BaseModel, Field, ValidationInfo, model_validator
 
+from metrics_ai.prose import assemble_xyz, lint_xyz, normalize_x, normalize_y, normalize_z, prose_defects
+
 # Integers/decimals not glued to a preceding identifier (so `SQLite3` is ignored). Trailing units
 # (`160ms`, `5.7x`) are allowed, and a match may never stop part-way through a decimal (`3435.1ms`).
 NUMBER_RE = re.compile(r"(?<![A-Za-z0-9_.])(\d+(?:\.\d+)?)(?!\.?\d)")
-XYZ_MARKERS = ("as measured by", ", by ")
 
 DENSITY_RANGES = {
-    "ultra-compact": (1, 114),
-    "standard": (150, 210),
-    "detailed": (220, 280),
+    "ultra-compact": (60, 115),
+    "standard": (130, 220),
+    "detailed": (220, 295),
 }
 
 
 def extract_numbers(text: str) -> list[float]:
-    return [float(m.group(1).rstrip(".")) for m in NUMBER_RE.finditer(text)]
+    return [float(m.group(1)) for m in NUMBER_RE.finditer(text)]
 
 
 def unknown_numbers(texts: list[str], allowed: set[float]) -> list[str]:
@@ -50,11 +51,22 @@ class XyzResponse(BaseModel):
     x_accomplishment: str = Field(min_length=3)
     y_measurement: str = Field(min_length=3)
     z_mechanism: str = Field(min_length=3)
-    combined_xyz_bullet: str = Field(min_length=10)
+    combined_xyz_bullet: str = ""
     cited_numbers: list[float] = Field(default_factory=list)
 
+    @model_validator(mode="before")
+    @classmethod
+    def assemble(cls, data: Any) -> Any:
+        """Normalize X/Y/Z and assemble the bullet in Python; the LLM's own sentence is discarded."""
+        if isinstance(data, dict) and all(isinstance(data.get(k), str) for k in
+                                          ("x_accomplishment", "y_measurement", "z_mechanism")):
+            x, y, z = data["x_accomplishment"], data["y_measurement"], data["z_mechanism"]
+            data = {**data, "x_accomplishment": normalize_x(x), "y_measurement": normalize_y(y),
+                    "z_mechanism": normalize_z(z), "combined_xyz_bullet": assemble_xyz(x, y, z)}
+        return data
+
     @model_validator(mode="after")
-    def numbers_must_be_measured(self, info: ValidationInfo) -> "XyzResponse":
+    def numbers_and_prose_must_pass(self, info: ValidationInfo) -> "XyzResponse":
         ctx = _ctx(info)
         allowed: set[float] = ctx["allowed_numbers"]
         bad = unknown_numbers([self.combined_xyz_bullet], allowed)
@@ -63,17 +75,17 @@ class XyzResponse(BaseModel):
                 f"combined_xyz_bullet contains numbers {bad} that are not in allowed_numbers "
                 f"{sorted(allowed)}. Use measured values verbatim; never round or invent metrics.")
         _check_cited(self.cited_numbers, allowed)
-        missing = [m for m in XYZ_MARKERS if m not in self.combined_xyz_bullet.lower()]
-        if missing:
-            raise ValueError(f"combined_xyz_bullet must follow 'Accomplished [X] as measured by [Y], "
-                             f"by doing [Z]'; missing {missing}.")
+        problems = lint_xyz(self.x_accomplishment, self.z_mechanism, self.combined_xyz_bullet,
+                            ctx.get("identifiers"), int(ctx.get("mechanism_count", 0)))
         density = ctx.get("density")
         if density in DENSITY_RANGES:
             lo, hi = DENSITY_RANGES[density]
             length = len(self.combined_xyz_bullet)
             if not lo <= length <= hi:
-                raise ValueError(f"combined_xyz_bullet is {length} characters; density '{density}' "
-                                 f"requires {lo}-{hi} characters.")
+                problems.append(f"assembled bullet is {length} characters; density '{density}' "
+                                f"requires {lo}-{hi} characters")
+        if problems:
+            raise ValueError("prose linter rejected the bullet: " + "; ".join(problems))
         return self
 
 
@@ -85,11 +97,15 @@ class StarResponse(BaseModel):
     cited_numbers: list[float] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def numbers_must_be_measured(self, info: ValidationInfo) -> "StarResponse":
+    def numbers_and_prose_must_pass(self, info: ValidationInfo) -> "StarResponse":
         allowed: set[float] = _ctx(info)["allowed_numbers"]
-        bad = unknown_numbers([self.situation, self.task, self.action, self.result], allowed)
+        fields = [self.situation, self.task, self.action, self.result]
+        bad = unknown_numbers(fields, allowed)
         if bad:
             raise ValueError(f"STAR text contains numbers {bad} that are not in allowed_numbers "
                              f"{sorted(allowed)}. Use measured values verbatim.")
         _check_cited(self.cited_numbers, allowed)
+        defects = [d for f in fields for d in prose_defects(f)]
+        if defects:
+            raise ValueError(f"prose linter rejected the STAR answer: awkward phrasing {defects}")
         return self

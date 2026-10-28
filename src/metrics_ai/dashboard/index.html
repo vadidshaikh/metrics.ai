@@ -37,7 +37,7 @@
   <section class="card" style="margin-top:16px"><h2>Telemetry runs</h2><div class="scroll"><table id="runs"><thead><tr>
     <th>Commit</th><th>Command</th><th>Latency (ms)</th><th>Peak RSS (MB)</th><th>Exit</th></tr></thead><tbody></tbody></table></div></section>
   <section class="card" style="margin-top:16px"><h2>Synthesized impacts</h2><div class="scroll"><table id="impacts"><thead><tr>
-    <th>Δ</th><th>Format</th><th>Role</th><th>Jev worth</th><th>Faithful</th><th>Model</th><th>Output</th></tr></thead><tbody></tbody></table></div></section>
+    <th>Δ</th><th>Format</th><th>Role</th><th>Gate</th><th>Worth</th><th>Faithful</th><th>Model</th><th>Output</th></tr></thead><tbody></tbody></table></div></section>
 </main>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <script src="https://cdn.canvasjs.com/canvasjs.min.js"></script>
@@ -89,6 +89,7 @@
       const tr = document.createElement("tr");
       const pre = document.createElement("pre"); pre.textContent = i.output_text || "(halted)";
       cell(tr, short(i.baseline_sha) + "→" + short(i.target_sha)); cell(tr, i.format_type); cell(tr, i.role);
+      cell(tr, i.gate_mode || "—");
       cell(tr, i.jev_worth_prob === null ? "—" : Number(i.jev_worth_prob).toFixed(3), "num");
       cell(tr, i.jev_faithful_prob === null ? "—" : Number(i.jev_faithful_prob).toFixed(2), "num");
       cell(tr, i.model_used || "—"); cell(tr, pre);

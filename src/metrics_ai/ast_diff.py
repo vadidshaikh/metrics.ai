@@ -154,6 +154,57 @@ def structural_signals(diff: dict[str, Any]) -> list[str]:
     return signals
 
 
+def _leaf(name: str) -> str:
+    """`path.py::Class.func@deco` -> `func`."""
+    return name.split("::")[-1].split("@")[0].split(".")[-1]
+
+
+def _join(names: list[str]) -> str:
+    names = [f"{n}()" for n in names]
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def mechanisms(diff: dict[str, Any]) -> list[str]:
+    """Distinct structural mechanisms, one per item, so prompts never fuse two into one phrase."""
+    items = []
+    for call in diff.get("batching_calls_added", []):
+        items.append(f"batched database writes into one transaction via {call}()" if call == "executemany"
+                     else f"batched operations via {call}()")
+    cached = sorted({_leaf(d) for d in diff.get("decorators_added", [])
+                     if d.rsplit("@", 1)[-1] in CACHE_DECORATORS})
+    for func in cached:
+        decorator = next(d.rsplit("@", 1)[-1] for d in diff["decorators_added"] if _leaf(d) == func)
+        items.append(f"cached repeated {func}() results in memory with @{decorator}")
+    hoisted = diff.get("calls_hoisted_out_of_loops", [])
+    if hoisted:
+        items.append(f"moved per-iteration {_join(hoisted)} calls out of the loop body")
+    nested = diff.get("nested_loops", {"before": 0, "after": 0})
+    if nested["after"] < nested["before"]:
+        items.append(f"removed nested loops ({nested['before']} to {nested['after']})")
+    if diff.get("concurrency_calls_added"):
+        items.append(f"added concurrency via {_join(diff['concurrency_calls_added'])}")
+    elif diff.get("async", {}).get("after", 0) > diff.get("async", {}).get("before", 0):
+        items.append("introduced async/await execution")
+    covered = set(cached)
+    extracted = [_leaf(f) for f in diff.get("added_functions", []) if _leaf(f) not in covered]
+    if len(extracted) >= 2 or diff.get("added_classes"):
+        items.append(f"extracted reusable helpers {_join(extracted[:4])}" if extracted
+                     else "extracted new classes")
+    return items
+
+
+def identifiers(diff: dict[str, Any], files: list[str]) -> set[str]:
+    """Concrete code identifiers a bullet may cite (function, call, decorator and file names)."""
+    names = {_leaf(f) for key in ("added_functions", "removed_functions") for f in diff.get(key, [])}
+    for key in ("batching_calls_added", "caching_decorators_added", "concurrency_calls_added",
+                "calls_hoisted_out_of_loops"):
+        names.update(diff.get(key, []))
+    for path in files:
+        base = path.replace("\\", "/").rsplit("/", 1)[-1]
+        names.update({base, base.rsplit(".", 1)[0]})
+    return {n for n in names if len(n) >= 4 and n not in {"__init__", "main", "run"}}
+
+
 def merge_diffs(per_file: dict[str, dict[str, Any]]) -> dict[str, Any]:
     """Aggregate per-file diffs into one repo-level structural diff."""
     total = diff_profiles(Profile(), Profile())

@@ -14,7 +14,8 @@ import git
 from radon.complexity import cc_visit
 from radon.raw import analyze
 
-from metrics_ai.ast_diff import diff_profiles, merge_diffs, profile_source, structural_signals
+from metrics_ai.ast_diff import (diff_profiles, identifiers, mechanisms, merge_diffs, profile_source,
+                                 structural_signals)
 
 
 def open_repo(root: Path) -> git.Repo:
@@ -154,6 +155,10 @@ def allowed_numbers(state: dict[str, Any]) -> set[float]:
     return nums
 
 
+def state_identifiers(state: dict[str, Any]) -> set[str]:
+    return identifiers(state["ast_structural_diff"], state["files_modified"])
+
+
 def build_state(commit: dict[str, Any], base_runs: list[dict[str, Any]],
                 tgt_runs: list[dict[str, Any]], command: str | None) -> dict[str, Any]:
     """Compact telemetry state handed to Jev and the synthesizer."""
@@ -169,7 +174,8 @@ def build_state(commit: dict[str, Any], base_runs: list[dict[str, Any]],
         "commit_message": commit.get("message", ""),
         "command": command,
         "files_modified": commit["files_modified_json"],
-        "ast_structural_diff": {"signals": ast_diff.get("signals", []), **compact_diff},
+        "ast_structural_diff": {"signals": ast_diff.get("signals", []),
+                                "mechanisms": mechanisms(total) if total else [], **compact_diff},
         "complexity_delta": {"cyclomatic_before": round(cc_b, 1), "cyclomatic_after": round(cc_a, 1),
                              "loc_delta": commit.get("loc_delta", 0)},
         "telemetry_delta": compute_deltas(base_runs, tgt_runs, cc_b, cc_a),

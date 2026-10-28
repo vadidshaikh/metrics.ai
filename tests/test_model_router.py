@@ -88,8 +88,7 @@ def test_discover_ranks_probes_and_locks(cfg):
 
 def test_discover_skips_provider_with_rejected_credentials(cfg):
     def handler(request):
-        if "/chat/completions" in str(request.url) and "ollama" not in str(request.url) \
-                and "11434" not in str(request.url):
+        if "/chat/completions" in str(request.url) and "127.0.0.1:9" not in str(request.url):
             return httpx.Response(401, json={"error": "Invalid username or password."})
         return _router_transport().handle_request(request)
     report = model_router.discover(cfg, transport=httpx.MockTransport(handler))

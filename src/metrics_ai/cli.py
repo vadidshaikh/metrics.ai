@@ -1,4 +1,4 @@
-"""Typer CLI: `metrics init | auth | wrap | pytest | generate | ui`."""
+"""Typer CLI: `metrics init | auth | wrap | pytest | generate | prune | ui`."""
 
 from __future__ import annotations
 
@@ -10,13 +10,10 @@ from typing import Optional
 import typer
 from rich.console import Console
 
-from metrics_ai import collector, config, model_router, profiler
-from metrics_ai.cli_render import (artifact_panel, delta_table, discovery_table, telemetry_table,
-                                   triage_table)
-from metrics_ai.decision_gate import DecisionGate, route_roles
-from metrics_ai.renderers import render_pr_md
+from metrics_ai import collector, config, model_router, pipeline, profiler
+from metrics_ai.cli_render import discovery_table, prune_table, telemetry_table
+from metrics_ai.decision_gate import DecisionGate
 from metrics_ai.storage import Ledger
-from metrics_ai.synthesizer import SynthesisError, ledger_hash, synthesize
 
 # Force UTF-8 so tree glyphs/emoji render when output is piped on Windows code pages.
 for _stream in (sys.stdout, sys.stderr):
@@ -91,8 +88,9 @@ def auth(groq_key: Optional[str] = typer.Option(None, "--groq-key"),
     else:
         console.print("[red]No model passed the live probe.[/]")
         raise typer.Exit(1)
-    jev = "configured" if config.get_secret(cfg, "jev_api_key") else "not set (offline gate will be used)"
-    console.print(f"Jev API key: {jev}")
+    jev = ("configured (Tier-1 jev_api gate)" if config.get_secret(cfg, "jev_api_key")
+           else "not set (Tier-2 llm_judge gate will use the locked model)")
+    console.print(f"Jev / TypeSafe API key: {jev}")
 
 
 def _record_head(ledger: Ledger, root: Path) -> str:
@@ -142,14 +140,6 @@ def capture() -> None:
         ledger.upsert_commit(collector.commit_record(repo, "HEAD"))
 
 
-def _pick_command(ledger: Ledger, base: str, tgt: str, command: Optional[str]) -> Optional[str]:
-    if command:
-        return command
-    base_cmds = {r["command"] for r in ledger.runs_for(base)}
-    shared = [r["command"] for r in reversed(ledger.runs_for(tgt)) if r["command"] in base_cmds]
-    return shared[0] if shared else None
-
-
 @app.command()
 def generate(commit: str = typer.Option("HEAD", "--commit", help="Target revision."),
              baseline: Optional[str] = typer.Option(None, "--baseline", help="Baseline (default: parent)."),
@@ -157,8 +147,13 @@ def generate(commit: str = typer.Option("HEAD", "--commit", help="Target revisio
              role: str = typer.Option("auto", "--role", help="auto | aiml | backend | mlops | tpm | all"),
              density: str = typer.Option("standard", "--density", help="ultra-compact | standard | detailed"),
              command: Optional[str] = typer.Option(None, "--command", help="Telemetry command to compare."),
-             force: bool = typer.Option(False, "--force", help="Bypass the Jev worthiness gate.")) -> None:
-    """Jev triage → auto-routed LLM synthesis + numeric guard → Jev faithfulness check."""
+             force: bool = typer.Option(False, "--force", help="Bypass the worthiness gate."),
+             offline_no_llm: bool = typer.Option(False, "--offline-no-llm",
+                                                 help="Use only the Tier-3 deterministic gate."),
+             jev_response: Optional[Path] = typer.Option(None, "--jev-response", exists=True, dir_okay=False,
+                                                         help="SystemOne triage reply saved from the Jev "
+                                                              "playground (see `metrics jev-request`).")) -> None:
+    """Stage 1 gate → Stage 2 LLM synthesis + numeric/prose guard → Stage 3 faithfulness/fluency review."""
     if fmt not in {"xyz", "star", "pr-md"}:
         raise typer.BadParameter("--format must be xyz, star or pr-md")
     if role not in {"auto", "all", "aiml", "backend", "mlops", "tpm"}:
@@ -166,70 +161,56 @@ def generate(commit: str = typer.Option("HEAD", "--commit", help="Target revisio
     if density not in {"ultra-compact", "standard", "detailed"}:
         raise typer.BadParameter("invalid --density")
     root, cfg, ledger = _ctx()
-    with collector.open_repo(root) as repo:
-        tgt = collector.resolve_sha(repo, commit)
-        base = collector.resolve_sha(repo, baseline or f"{tgt}~1")
-        record = collector.commit_record(repo, tgt, base)
-    ledger.upsert_commit(record)
-    cmd = _pick_command(ledger, base, tgt, command)
-    base_runs = ledger.runs_for(base, cmd)[-1:] if cmd else []
-    tgt_runs = ledger.runs_for(tgt, cmd)[-1:] if cmd else []
-    if not (base_runs and tgt_runs):
-        console.print("[yellow]![/] No shared telemetry for both commits; using static AST/complexity only.")
-    state = collector.build_state(record, base_runs, tgt_runs, cmd)
-    allowed = collector.allowed_numbers(state)
-    console.print(delta_table(state))
-    gate = DecisionGate(cfg, config.get_secret(cfg, "jev_api_key"))
-    triage = gate.triage(state)
-    threshold = float(cfg["jev"]["worthy_threshold"])
-    console.print(triage_table(triage, threshold))
-    for note in triage.notes:
-        console.print(f"[dim]{note}[/]")
-    base_row = {"baseline_sha": base, "target_sha": tgt, "format_type": fmt, "density": density,
-                "jev_worth_prob": triage.worth_prob, "jev_impact_score": triage.impact_score}
-
-    if fmt == "pr-md":
-        text = render_pr_md(state)
-        ledger.insert_impact({**base_row, "role": "n/a", "provider_used": "deterministic",
-                              "model_used": "renderers.render_pr_md", "output_text": text,
-                              "structured_json": state, "ledger_hash": ledger_hash(state, text)})
-        console.print(f"[dim]PR Markdown · deterministic renderer · hash={ledger_hash(state, text)[:12]}[/]")
-        print(text)
-        return
-    if triage.worth_prob < threshold and not force:
-        reason = (f"is_resume_worthy p={triage.worth_prob:.3f} < {threshold:.2f}: the commit lacks a "
-                  "substantive structural change backed by measured gains. Use --force to override.")
-        ledger.insert_impact({**base_row, "role": role, "output_text": "", "structured_json": {"halted": reason},
-                              "ledger_hash": ledger_hash(state, "")})
-        console.print(f"[bold yellow]Synthesis halted.[/] {reason}")
-        return
-    if not model_router.model_chain(cfg):
-        with console.status("No model locked yet; running discovery…"):
-            model_router.discover(cfg)
-        config.save_config(root, cfg)
-    failed = []
-    for target_role in route_roles(triage.role_distribution, role):
-        try:
-            result = synthesize(cfg, gate, state, allowed, fmt, target_role, density,
-                                log=lambda m: console.print(f"[dim]{m}[/]"))
-        except (SynthesisError, model_router.ProviderUnavailable) as exc:
-            console.print(f"[red]{target_role}: {exc}[/]")
-            failed.append(target_role)
-            continue
-        digest = ledger_hash(state, result.output_text)
-        ledger.insert_impact({**base_row, "role": target_role,
-                              "jev_role_prob": triage.role_distribution.get(target_role),
-                              "jev_faithful_prob": result.faithful_prob, "provider_used": result.provider,
-                              "model_used": result.model, "output_text": result.output_text,
-                              "structured_json": result.structured, "ledger_hash": digest})
-        console.print(artifact_panel(
-            f"{fmt.upper()} · {target_role}", result.output_text,
-            f"{result.provider}/{result.model} · faithful={result.faithful_prob:.2f} ({result.faithful_source})"
-            f" · attempts={result.attempts} · hash={digest[:12]}"))
-        console.print(json.dumps({"role": target_role, "cited_numbers": result.structured["cited_numbers"]}))
+    failed = pipeline.generate(root, cfg, ledger, console, commit=commit, baseline=baseline, fmt=fmt,
+                               role=role, density=density, command=command, force=force,
+                               offline=offline_no_llm, jev_response=_load_json(jev_response))
     if failed:
         console.print(f"[red]No verified artifact for: {', '.join(failed)}[/]")
         raise typer.Exit(1)
+
+
+def _load_json(path: Optional[Path]) -> Optional[dict]:
+    if path is None:
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8-sig"))
+    except json.JSONDecodeError as exc:
+        raise typer.BadParameter(f"{path} is not valid JSON: {exc}") from exc
+
+
+@app.command("jev-request")
+def jev_request(commit: str = typer.Option("HEAD", "--commit"),
+                baseline: Optional[str] = typer.Option(None, "--baseline"),
+                command: Optional[str] = typer.Option(None, "--command"),
+                stage: str = typer.Option("triage", "--stage", help="triage | review"),
+                candidate: str = typer.Option("", "--candidate", help="Bullet text for --stage review."),
+                out: Optional[Path] = typer.Option(None, "--out", help="Also write the body to this file.")) -> None:
+    """Print the exact SystemOne request body to run in the Jev playground (no API key needed)."""
+    if stage not in {"triage", "review"}:
+        raise typer.BadParameter("--stage must be triage or review")
+    if stage == "review" and not candidate:
+        raise typer.BadParameter("--stage review needs --candidate")
+    root, cfg, ledger = _ctx()
+    quiet = Console(stderr=True, highlight=False)
+    _, _, state = pipeline.load_state(root, ledger, quiet, commit, baseline, command)
+    body = DecisionGate(cfg).request_body(stage, state, candidate)
+    text = json.dumps(body, indent=2, ensure_ascii=False)
+    if out:
+        out.write_text(text + "\n", encoding="utf-8")
+        quiet.print(f"[dim]wrote {out}[/]")
+    print(text)
+
+
+@app.command()
+def prune(all_rows: bool = typer.Option(False, "--all", help="Truncate every ledger table."),
+          keep_latest: bool = typer.Option(False, "--keep-latest",
+                                           help="Keep only the newest run/synthesis per key.")) -> None:
+    """Remove stale or superseded ledger rows, then VACUUM."""
+    if all_rows == keep_latest:
+        raise typer.BadParameter("pass exactly one of --all or --keep-latest")
+    _, _, ledger = _ctx()
+    deleted = ledger.prune_ledger("all" if all_rows else "keep_latest")
+    console.print(prune_table(deleted, ledger.counts()))
 
 
 @app.command()

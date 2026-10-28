@@ -6,6 +6,8 @@ import json
 import re
 from typing import Any
 
+from metrics_ai.prose import prose_defects
+
 ROLE_KEYWORDS = {
     "aiml": ["torch", "tensorflow", "numpy", "embedding", "inference", "tensor", "sklearn",
              "transformers", "llm", "train", "model"],
@@ -89,7 +91,8 @@ def role_distribution(state: dict[str, Any]) -> dict[str, float]:
 
 def faithfulness(evidence: dict[str, Any], z_clause: str) -> float:
     """Fraction of mechanisms claimed in Z that are evidenced by the AST diff / files."""
-    haystack = json.dumps(evidence).lower()
+    # The candidate itself is never evidence for its own claims.
+    haystack = json.dumps({k: v for k, v in evidence.items() if k != "candidate_bullet"}).lower()
     z = z_clause.lower()
     claimed: list[list[str]] = [alts for pattern, alts in MECHANISMS.items() if re.search(pattern, z)]
     for match in IDENTIFIER.finditer(z_clause):
@@ -100,3 +103,11 @@ def faithfulness(evidence: dict[str, Any], z_clause: str) -> float:
         return 0.80
     found = sum(1 for alts in claimed if any(a in haystack for a in alts))
     return round(0.97 * found / len(claimed), 3)
+
+
+def naturalness(candidate: str) -> tuple[float, str]:
+    """Deterministic fluency proxy: the prose linter's collision patterns."""
+    defects = prose_defects(candidate)
+    if defects:
+        return 0.2, f"awkward phrasing {defects}"
+    return 0.9, ""

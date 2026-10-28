@@ -9,7 +9,7 @@ import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS commits (
@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS synthesized_impacts (
     role              TEXT,
     format_type       TEXT,
     density           TEXT,
+    gate_mode         TEXT,
     jev_worth_prob    REAL,
     jev_impact_score  REAL,
     jev_role_prob     REAL,
@@ -56,12 +57,23 @@ CREATE TABLE IF NOT EXISTS synthesized_impacts (
 CREATE INDEX IF NOT EXISTS idx_runs_commit ON telemetry_runs(commit_sha, command);
 """
 
+# Delete every row except the newest per partition (newest = latest created_at, then rowid).
+_SUPERSEDED = """
+DELETE FROM {table} WHERE {key} NOT IN (
+    SELECT {key} FROM (
+        SELECT {key}, ROW_NUMBER() OVER (PARTITION BY {partition}
+                                         ORDER BY created_at DESC, rowid DESC) AS rn
+        FROM {table}
+    ) WHERE rn = 1
+)
+"""
+
 RUN_COLUMNS = (
     "run_id", "commit_sha", "command", "mean_latency_ms", "peak_memory_mb",
     "throughput_items_sec", "exit_code", "raw_benchmark_json", "created_at",
 )
 IMPACT_COLUMNS = (
-    "event_id", "baseline_sha", "target_sha", "role", "format_type", "density",
+    "event_id", "baseline_sha", "target_sha", "role", "format_type", "density", "gate_mode",
     "jev_worth_prob", "jev_impact_score", "jev_role_prob", "jev_faithful_prob",
     "provider_used", "model_used", "output_text", "structured_json", "ledger_hash", "created_at",
 )
@@ -88,6 +100,10 @@ class Ledger:
     def init_schema(self) -> None:
         with self.connect() as conn:
             conn.executescript(SCHEMA)
+            # Migrate ledgers created before `gate_mode` existed.
+            cols = {r["name"] for r in conn.execute("PRAGMA table_info(synthesized_impacts)")}
+            if "gate_mode" not in cols:
+                conn.execute("ALTER TABLE synthesized_impacts ADD COLUMN gate_mode TEXT")
 
     # -- commits ---------------------------------------------------------
     def upsert_commit(self, record: dict[str, Any]) -> None:
@@ -166,6 +182,40 @@ class Ledger:
                 [row.get(c) for c in IMPACT_COLUMNS],
             )
         return row["event_id"]
+
+    def prune_ledger(self, mode: Literal["all", "keep_latest"]) -> dict[str, int]:
+        """`all`: truncate every table. `keep_latest`: drop superseded rows and orphan commits.
+
+        Returns the number of rows deleted per table; the database is VACUUMed afterwards.
+        """
+        if mode not in ("all", "keep_latest"):
+            raise ValueError(f"unknown prune mode {mode!r}")
+        deleted: dict[str, int] = {}
+        with self.connect() as conn:
+            if mode == "all":
+                for table in ("synthesized_impacts", "telemetry_runs", "commits"):
+                    deleted[table] = conn.execute(f"DELETE FROM {table}").rowcount
+            else:
+                deleted["telemetry_runs"] = conn.execute(_SUPERSEDED.format(
+                    table="telemetry_runs", key="run_id", partition="commit_sha, command")).rowcount
+                deleted["synthesized_impacts"] = conn.execute(_SUPERSEDED.format(
+                    table="synthesized_impacts", key="event_id",
+                    partition="baseline_sha, target_sha, role, format_type, density")).rowcount
+                deleted["commits"] = conn.execute(
+                    "DELETE FROM commits WHERE sha NOT IN (SELECT commit_sha FROM telemetry_runs) "
+                    "AND sha NOT IN (SELECT COALESCE(baseline_sha, '') FROM synthesized_impacts) "
+                    "AND sha NOT IN (SELECT COALESCE(target_sha, '') FROM synthesized_impacts)").rowcount
+        vacuum = sqlite3.connect(self.path, isolation_level=None)
+        try:
+            vacuum.execute("VACUUM")
+        finally:
+            vacuum.close()
+        return deleted
+
+    def counts(self) -> dict[str, int]:
+        with self.connect() as conn:
+            return {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+                    for t in ("commits", "telemetry_runs", "synthesized_impacts")}
 
     def dump(self) -> dict[str, list[dict[str, Any]]]:
         with self.connect() as conn:

@@ -42,12 +42,12 @@ def delta_table(state: dict[str, Any]) -> Table:
 
 
 def triage_table(result: TriageResult, threshold: float) -> Table:
-    table = Table(title=f"Jev triage (source: {result.source})")
+    table = Table(title=f"Stage-1 decision gate (gate_mode: {result.gate_mode})")
     table.add_column("Question")
     table.add_column("Answer")
     verdict = "PASS" if result.worth_prob >= threshold else "BELOW THRESHOLD"
     table.add_row("is_resume_worthy (noul)", f"p={result.worth_prob:.3f}  [{verdict} @ {threshold:.2f}]")
-    table.add_row("impact_tier (score)", f"{result.impact_tier} / 5")
+    table.add_row("impact_tier (score)", f"{result.impact_tier} / 5  (normalized score {result.impact_score:.2f})")
     dist = ", ".join(f"{r}={p:.3f}" for r, p in sorted(result.role_distribution.items(), key=lambda kv: -kv[1]))
     table.add_row("best_fit_role (choice)", dist)
     return table
@@ -79,3 +79,12 @@ def discovery_table(report: dict[str, Any]) -> Table:
 
 def artifact_panel(title: str, body: str, subtitle: str) -> Panel:
     return Panel(body, title=title, subtitle=subtitle, expand=False)
+
+
+def prune_table(deleted: dict[str, int], remaining: dict[str, int]) -> Table:
+    table = Table(title="Ledger prune (VACUUM complete)")
+    for col in ("Table", "Deleted", "Remaining"):
+        table.add_column(col)
+    for name in ("commits", "telemetry_runs", "synthesized_impacts"):
+        table.add_row(name, str(deleted.get(name, 0)), str(remaining.get(name, 0)))
+    return table
