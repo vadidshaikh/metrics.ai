@@ -132,3 +132,18 @@ def test_chat_raises_when_all_fail(cfg):
 def test_chat_requires_locked_model():
     with pytest.raises(model_router.ProviderUnavailable):
         model_router.chat(copy.deepcopy(DEFAULT_CONFIG), [])
+
+
+def test_chat_waits_out_short_429_then_retries_same_model(cfg, monkeypatch):
+    cfg["router"].update(active_provider="hf", active_model="m1", fallback_models=[])
+    calls = []
+    sleeps = []
+    monkeypatch.setattr(model_router.time, "sleep", sleeps.append)
+
+    def handler(request):
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx.Response(429, headers={"retry-after": "3"}, json={})
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+    provider, model, text, index = model_router.chat(cfg, [], transport=httpx.MockTransport(handler))
+    assert (model, text, sleeps, len(calls)) == ("m1", "ok", [3.0], 2)

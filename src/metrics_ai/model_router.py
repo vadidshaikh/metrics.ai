@@ -164,6 +164,18 @@ def discover(cfg: dict[str, Any], transport: httpx.BaseTransport | None = None) 
             "total_discovered": len(candidates)}
 
 
+MAX_RETRY_AFTER_S = 20.0
+
+
+def _retry_after(resp: httpx.Response) -> float | None:
+    """Seconds to wait from a 429's Retry-After header, if present and short enough."""
+    try:
+        wait = float(resp.headers.get("retry-after", ""))
+    except ValueError:
+        return None
+    return wait if 0 <= wait <= MAX_RETRY_AFTER_S else None
+
+
 def model_chain(cfg: dict[str, Any]) -> list[tuple[str, str]]:
     router = cfg.get("router", {})
     chain = [(router["active_provider"], router["active_model"])] if router.get("active_model") else []
@@ -189,6 +201,14 @@ def chat(cfg: dict[str, Any], messages: list[dict[str, str]], start_index: int =
             except httpx.TransportError as exc:
                 errors.append(f"{provider}/{model}: {type(exc).__name__}")
                 continue
+            if resp.status_code == 429 and (wait := _retry_after(resp)) is not None:
+                time.sleep(wait)  # honour short rate-limit windows once before failing over
+                try:
+                    resp = client.post(f"{base_url(provider, cfg)}/chat/completions", json=body,
+                                       headers=_headers(provider, cfg))
+                except httpx.TransportError as exc:
+                    errors.append(f"{provider}/{model}: {type(exc).__name__}")
+                    continue
             if resp.status_code in RETRYABLE:
                 errors.append(f"{provider}/{model}: HTTP {resp.status_code}")
                 continue

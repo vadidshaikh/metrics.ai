@@ -34,6 +34,9 @@ HARD RULES:
 2. Write numbers without thousands separators. A speedup is written like `4.2x`.
 3. Every library, database, algorithm or mechanism you mention must appear in AST_DIFF or FILES.
 4. Write fluent executive English: parallel structure, no stacked prepositions, no run-ons.
+   State reductions as positive magnitudes ("a 95.7% reduction"), never "-95.7%".
+   Never mention a metric whose TELEMETRY value is null, and never draw a conclusion the numbers
+   contradict (e.g. a positive loc_delta means the code grew, not that it got leaner).
 5. Respond with a single JSON object and nothing else."""
 
 XYZ_SHAPE = '{"x_accomplishment": str, "y_measurement": str, "z_mechanism": str, "cited_numbers": [number]}'
@@ -69,10 +72,12 @@ def _xyz_task(density: str) -> str:
         "  'Accomplished {x_accomplishment} as measured by {y_measurement}, by {z_mechanism}.'\n"
         "- x_accomplishment: a NOUN PHRASE (e.g. 'a 95.3% reduction in ingest latency'); do not start with "
         "a verb or with 'Accomplished'.\n"
-        "- y_measurement: what was measured and how (do not start with 'as measured by').\n"
+        "- y_measurement: a NOUN PHRASE naming what was measured (e.g. 'mean benchmark latency dropping from "
+        "A ms to B ms'); no finite verbs like 'fell'/'was', and do not start with 'as measured by'.\n"
         "- z_mechanism: starts with a lowercase gerund verb (e.g. 'batching ...'); never start with 'by' or "
         "'doing'. Write each MECHANISMS item you use as its own parallel gerund clause, joined with 'and'.\n"
-        "- Name at least one exact identifier from IDENTIFIERS.\n"
+        "- Name at least one exact identifier from IDENTIFIERS, written plainly (executemany, lru_cache; no "
+        "'()' or '@'). Do not repeat the same number in X and Y.\n"
         f"- The assembled sentence MUST be {lo}-{hi} characters, so the three parts together need "
         f"{lo - XYZ_OVERHEAD}-{hi - XYZ_OVERHEAD} characters.\n"
         f"Return JSON shaped {XYZ_SHAPE}.")
@@ -85,7 +90,9 @@ def build_messages(state: dict[str, Any], allowed: set[float], fmt: str, role: s
         task = _xyz_task(density)
     else:
         task = ("Write a STAR behavioral interview answer grounded in the exact file names, AST diff and "
-                "benchmark deltas. Describe each MECHANISMS item as a separate step in ACTION. "
+                "benchmark deltas. SITUATION and TASK describe only what COMMAND and TELEMETRY show (the measured "
+                "workload and its baseline numbers); do not invent services, users, teams, APIs, deadlines or "
+                "downstream impact. Describe each MECHANISMS item as a separate step in ACTION. "
                 f"Return JSON shaped {STAR_SHAPE}.")
     payload = {
         "ROLE_LENS": ROLE_LENS[role],
@@ -112,7 +119,33 @@ def ledger_hash(state: dict[str, Any], output_text: str) -> str:
 def validation_context(state: dict[str, Any], allowed: set[float], fmt: str, density: str) -> dict[str, Any]:
     return {"allowed_numbers": allowed, "density": density if fmt == "xyz" else None,
             "identifiers": state_identifiers(state),
-            "mechanism_count": len(state["ast_structural_diff"].get("mechanisms", []))}
+            "mechanisms": list(state["ast_structural_diff"].get("mechanisms", [])),
+            "unmeasured": unmeasured_terms(state)}
+
+
+def unmeasured_terms(state: dict[str, Any]) -> list[str]:
+    """Metric words a bullet may not use because the telemetry has no value for them."""
+    delta = state["telemetry_delta"]
+    terms = []
+    if delta.get("throughput_delta_pct") is None:
+        terms += ["throughput", "ops/sec", "items/sec", "requests per second"]
+    if delta.get("memory_delta_pct") is None:
+        terms += ["memory", "rss"]
+    if delta.get("latency_delta_pct") is None:
+        terms += ["latency", "speedup"]
+    return terms
+
+
+def review_feedback(review: Any, f_min: float, n_min: float) -> str:
+    hints = []
+    if review.faithful_prob < f_min:
+        hints.append("FAITHFULNESS is low: claim only mechanisms listed in MECHANISMS / AST_DIFF; drop anything else.")
+    if review.natural_prob < n_min:
+        hints.append("FLUENCY is low: write plain executive English; X and Y must be noun phrases; Z is parallel "
+                     "gerund clauses joined with 'and'; no code punctuation; no repeated numbers; keep it concise.")
+    return (f"Rejected by the {review.gate_mode} review gate (faithful={review.faithful_prob:.2f}, "
+            f"natural={review.natural_prob:.2f}; need >= {f_min:.2f} and >= {n_min:.2f}). "
+            f"Critique: {review.critique or 'none given'}\n" + "\n".join(hints) + "\nRewrite. JSON only.")
 
 
 def synthesize(cfg: dict[str, Any], gate: DecisionGate, state: dict[str, Any], allowed: set[float],

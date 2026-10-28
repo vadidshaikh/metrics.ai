@@ -31,7 +31,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "jev": {
         "endpoint": "https://api.typesafe.ai/v1/systemone",
         "model": "jev-1.13.0",
-        "timeout_s": 8.0,
+        "timeout_s": 30.0,
         "worthy_threshold": 0.60,
         "faithful_threshold": 0.80,
         "natural_threshold": 0.80,
@@ -55,6 +55,7 @@ LEGACY_DEFAULTS = {
     ("jev", "endpoint"): ("https://jevmodel.net/v1/systemone", "https://api.typesafe.ai/v1/systemone"),
     ("jev", "model"): ("typesafe/jev-1.13.0", "jev-1.13.0"),
     ("jev", "faithful_threshold"): (0.75, 0.80),
+    ("jev", "timeout_s"): (8.0, 30.0),
 }
 
 

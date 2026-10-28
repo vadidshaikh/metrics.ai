@@ -7,7 +7,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field, ValidationInfo, model_validator
 
-from metrics_ai.prose import assemble_xyz, lint_xyz, normalize_x, normalize_y, normalize_z, prose_defects
+from metrics_ai.prose import (assemble_xyz, lint_xyz, negated_reductions, normalize_x, normalize_y, normalize_z,
+                              plain_identifiers, prose_defects, unmeasured_claims)
 
 # Integers/decimals not glued to a preceding identifier (so `SQLite3` is ignored). Trailing units
 # (`160ms`, `5.7x`) are allowed, and a match may never stop part-way through a decimal (`3435.1ms`).
@@ -61,8 +62,9 @@ class XyzResponse(BaseModel):
         if isinstance(data, dict) and all(isinstance(data.get(k), str) for k in
                                           ("x_accomplishment", "y_measurement", "z_mechanism")):
             x, y, z = data["x_accomplishment"], data["y_measurement"], data["z_mechanism"]
-            data = {**data, "x_accomplishment": normalize_x(x), "y_measurement": normalize_y(y),
-                    "z_mechanism": normalize_z(z), "combined_xyz_bullet": assemble_xyz(x, y, z)}
+            data = {**data, "x_accomplishment": plain_identifiers(normalize_x(x)),
+                    "y_measurement": plain_identifiers(normalize_y(y)),
+                    "z_mechanism": plain_identifiers(normalize_z(z)), "combined_xyz_bullet": assemble_xyz(x, y, z)}
         return data
 
     @model_validator(mode="after")
@@ -76,7 +78,8 @@ class XyzResponse(BaseModel):
                 f"{sorted(allowed)}. Use measured values verbatim; never round or invent metrics.")
         _check_cited(self.cited_numbers, allowed)
         problems = lint_xyz(self.x_accomplishment, self.z_mechanism, self.combined_xyz_bullet,
-                            ctx.get("identifiers"), int(ctx.get("mechanism_count", 0)))
+                            ctx.get("identifiers"), list(ctx.get("mechanisms", [])), self.y_measurement,
+                            list(ctx.get("unmeasured", [])))
         density = ctx.get("density")
         if density in DENSITY_RANGES:
             lo, hi = DENSITY_RANGES[density]
@@ -98,14 +101,26 @@ class StarResponse(BaseModel):
 
     @model_validator(mode="after")
     def numbers_and_prose_must_pass(self, info: ValidationInfo) -> "StarResponse":
-        allowed: set[float] = _ctx(info)["allowed_numbers"]
+        ctx = _ctx(info)
+        allowed: set[float] = ctx["allowed_numbers"]
         fields = [self.situation, self.task, self.action, self.result]
         bad = unknown_numbers(fields, allowed)
         if bad:
             raise ValueError(f"STAR text contains numbers {bad} that are not in allowed_numbers "
                              f"{sorted(allowed)}. Use measured values verbatim.")
         _check_cited(self.cited_numbers, allowed)
-        defects = [d for f in fields for d in prose_defects(f)]
+        text = " ".join(fields)
+        problems = []
+        defects = prose_defects(text)
         if defects:
-            raise ValueError(f"prose linter rejected the STAR answer: awkward phrasing {defects}")
+            problems.append(f"awkward phrasing {defects}")
+        negated = negated_reductions(text)
+        if negated:
+            problems.append(f"double negative {negated}: write reductions as positive magnitudes (e.g. "
+                            "'a 95.7% reduction'), never with a minus sign")
+        claimed = unmeasured_claims(text, list(ctx.get("unmeasured", [])))
+        if claimed:
+            problems.append(f"mentions {claimed} but that metric was not measured")
+        if problems:
+            raise ValueError("prose linter rejected the STAR answer: " + "; ".join(problems))
         return self

@@ -190,3 +190,17 @@ def test_manual_playground_response_drives_tier1_without_a_key():
 def test_unusable_manual_response_falls_through_with_note():
     result = DecisionGate(DEFAULT_CONFIG).triage(make_state(), jev_response={"oops": 1})
     assert result.gate_mode == GATE_OFFLINE and "unusable" in result.notes[0]
+
+
+def test_openjev_reply_shape_is_parsed():
+    # OpenJev: noul -> {"noul": p}; choice -> {"choice", "probabilities", "confidence"};
+    # score -> {"score": 0-indexed expected level, "legend", "probabilities", "confidence"}.
+    answers = {"model": "openjev-latest", "answers": {
+        "is_resume_worthy": {"noul": 0.99},
+        "impact_tier": {"score": 3.7, "legend": [], "probabilities": [0, 0, 0.05, 0.2, 0.75], "confidence": 0.9},
+        "best_fit_role": {"choice": "backend", "probabilities": {"aiml": 0.1, "backend": 0.6, "mlops": 0.3,
+                                                                 "tpm": 0.0}, "confidence": 0.6}},
+        "usage": {}}
+    result = DecisionGate(DEFAULT_CONFIG, "k", transport=_jev_transport(answers)).triage(make_state())
+    assert (result.gate_mode, result.worth_prob, result.impact_tier, result.impact_score) == (GATE_JEV, 0.99, 5, 4.7)
+    assert result.role_distribution["backend"] == 0.6

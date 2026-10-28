@@ -66,7 +66,8 @@ def _answer(data: dict[str, Any], qid: str) -> dict[str, Any]:
 
 
 def _prob(ans: dict[str, Any]) -> float:
-    value = ans.get("probability", ans.get("p_true", ans.get("score")))
+    # TypeSafe-style `probability`, OpenJev-style `noul` (P(yes)), or generic fallbacks.
+    value = next((ans[k] for k in ("probability", "noul", "p_true", "score") if ans.get(k) is not None), None)
     if value is None:
         raise ValueError("Jev answer has no probability")
     return float(value)
@@ -84,7 +85,8 @@ def review_state(state: dict[str, Any], candidate: str) -> dict[str, Any]:
 def parse_triage(data: dict[str, Any], notes: list[str] | None = None) -> TriageResult:
     tier_ans = _answer(data, "impact_tier")
     tier, score = normalize_tier(tier_ans.get("score", tier_ans.get("value", tier_ans.get("expected"))))
-    dist = normalize_distribution(_answer(data, "best_fit_role").get("distribution", {}))
+    role_ans = _answer(data, "best_fit_role")
+    dist = normalize_distribution(role_ans.get("distribution") or role_ans.get("probabilities") or {})
     return TriageResult(_prob(_answer(data, "is_resume_worthy")), tier, score, dist, GATE_JEV, notes or [])
 
 
@@ -94,7 +96,7 @@ class DecisionGate:
         jev = cfg.get("jev", {})
         self.endpoint = jev.get("endpoint", "https://api.typesafe.ai/v1/systemone")
         self.model = jev.get("model", "jev-1.13.0")
-        self.timeout = float(jev.get("timeout_s", 8.0))
+        self.timeout = float(jev.get("timeout_s", 30.0))
         self.api_key = "" if offline else api_key
         self.judge = None if offline else judge
         self.transport = transport

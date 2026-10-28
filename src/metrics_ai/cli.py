@@ -64,7 +64,10 @@ def init(hook: bool = typer.Option(False, "--hook", help="Install a fast .git/ho
 def auth(groq_key: Optional[str] = typer.Option(None, "--groq-key"),
          hf_token: Optional[str] = typer.Option(None, "--hf-token"),
          jev_key: Optional[str] = typer.Option(None, "--jev-key"),
-         prefer: Optional[str] = typer.Option(None, "--prefer", help="groq | hf | ollama")) -> None:
+         prefer: Optional[str] = typer.Option(None, "--prefer", help="groq | hf | ollama"),
+         jev_endpoint: Optional[str] = typer.Option(None, "--jev-endpoint",
+                                                    help="SystemOne URL, e.g. https://api.codiv.ai/v1/systemone"),
+         jev_model: Optional[str] = typer.Option(None, "--jev-model", help="e.g. jev-1.13.0 or openjev-latest")) -> None:
     """Store credentials, then discover, score, probe and lock the best model."""
     root, cfg, _ = _ctx()
     cfg = config.store_secrets(root, cfg, groq_api_key=groq_key, hf_token=hf_token, jev_api_key=jev_key)
@@ -72,6 +75,10 @@ def auth(groq_key: Optional[str] = typer.Option(None, "--groq-key"),
         if prefer not in {"groq", "hf", "ollama"}:
             raise typer.BadParameter("--prefer must be groq, hf or ollama")
         cfg["providers"]["prefer"] = prefer
+    if jev_endpoint:
+        cfg["jev"]["endpoint"] = jev_endpoint
+    if jev_model:
+        cfg["jev"]["model"] = jev_model
     for env in config.shadowed_secrets(cfg):
         console.print(f"[yellow]![/] ${env} is set and overrides the key stored in config.toml; "
                       f"unset it to use the stored key.")
@@ -90,7 +97,7 @@ def auth(groq_key: Optional[str] = typer.Option(None, "--groq-key"),
         raise typer.Exit(1)
     jev = ("configured (Tier-1 jev_api gate)" if config.get_secret(cfg, "jev_api_key")
            else "not set (Tier-2 llm_judge gate will use the locked model)")
-    console.print(f"Jev / TypeSafe API key: {jev}")
+    console.print(f"Jev / TypeSafe API key: {jev} · endpoint {cfg['jev']['endpoint']} · model {cfg['jev']['model']}")
 
 
 def _record_head(ledger: Ledger, root: Path) -> str:

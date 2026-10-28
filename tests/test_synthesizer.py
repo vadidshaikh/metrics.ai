@@ -199,3 +199,36 @@ def test_pr_markdown_and_ledger_hash():
     md = render_pr_md(STATE)
     assert "| Mean latency (ms) | 1234.6 | 216.0 | -82.5% | ✅ improved |" in md and "`executemany`" in md
     assert ledger_hash(STATE, "a") == ledger_hash(copy.deepcopy(STATE), "a") != ledger_hash(STATE, "b")
+
+
+def test_y_must_be_a_noun_phrase_not_a_clause():
+    with pytest.raises(ValidationError, match=r"\[Y\] must be a noun phrase"):
+        _validate(_xyz(y="mean latency fell from 1234.6 ms to 216.0 ms"))
+
+
+def test_code_punctuation_is_stripped_and_single_mechanism_needs_no_conjunction():
+    obj = _validate(_xyz(z="batching SQLite inserts into one transaction via executemany()"))
+    assert "executemany()" not in obj.combined_xyz_bullet and "via executemany." in obj.combined_xyz_bullet
+    assert obj.z_mechanism.endswith("via executemany")  # the [Z] tree line matches the bullet
+    assert "@" not in _validate(_xyz(z="batching inserts with executemany and caching parses with @lru_cache"))\
+        .combined_xyz_bullet
+
+
+def test_unmeasured_metric_claims_are_rejected():
+    # make_state has no throughput telemetry, so "throughput" must be refused.
+    with pytest.raises(ValidationError, match="throughput"):
+        _validate(_xyz(x="a 5.7x speedup in ingest throughput"))
+
+
+def test_star_rejects_double_negative_and_unmeasured_metric():
+    ctx = validation_context(STATE, ALLOWED, "star", "standard")
+    star = {"situation": "Ledger ingest took 1234.6 ms per benchmark run.", "task": "Reduce ingest latency.",
+            "action": "Batched inserts with executemany and cached parses with lru_cache.",
+            "result": "Mean latency fell to 216.0 ms, an 82.5% reduction.", "cited_numbers": [1234.6, 216.0, 82.5]}
+    StarResponse.model_validate(star, context=ctx)
+    with pytest.raises(ValidationError, match="double negative"):
+        StarResponse.model_validate({**star, "result": "Latency fell to 216.0 ms, a reduction of -82.5%."},
+                                    context=ctx)
+    with pytest.raises(ValidationError, match="throughput"):
+        StarResponse.model_validate({**star, "situation": "Slow ingest at 1234.6 ms constrained throughput."},
+                                    context=ctx)
