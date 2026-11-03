@@ -16,7 +16,10 @@ HF_BASE = "https://router.huggingface.co/v1"
 RETRYABLE = {429, 500, 502, 503, 504}
 BACKOFF_S = (1.5, 3.0)          # waits before the 2nd and 3rd attempt on a 429
 MAX_RETRY_AFTER_S = 20.0        # longest Retry-After we are willing to honour inline
-CHAIN_COOLDOWN_S = 20.0         # one extra pass over the whole chain when *everything* is rate-limited
+CHAIN_COOLDOWN_S = 20.0         # minimum wait before re-trying the chain when a model was rate-limited
+MAX_CHAIN_COOLDOWN_S = 60.0     # cap for a provider-announced token-window reset
+CHAIN_PASSES = 3                # passes over the whole chain (2 cooldowns at most)
+_DURATION_RE = re.compile(r"(?:(\d+(?:\.\d+)?)h)?(?:(\d+(?:\.\d+)?)m(?!s))?(?:(\d+(?:\.\d+)?)s)?(?:(\d+(?:\.\d+)?)ms)?$")
 
 
 class ProviderUnavailable(RuntimeError):
@@ -43,6 +46,15 @@ def retry_after(resp: httpx.Response) -> float | None:
     except ValueError:
         return None
     return wait if 0 <= wait <= MAX_RETRY_AFTER_S else None
+
+
+def token_reset(resp: httpx.Response) -> float | None:
+    """Seconds until a token-per-minute window refills, from Groq's `x-ratelimit-reset-tokens` ("28.4s")."""
+    match = _DURATION_RE.match(resp.headers.get("x-ratelimit-reset-tokens", "").strip())
+    if not match or not any(match.groups()):
+        return None
+    h, m, s, ms = (float(g) if g else 0.0 for g in match.groups())
+    return h * 3600 + m * 60 + s + ms / 1000
 
 
 def model_chain(cfg: dict[str, Any]) -> list[tuple[str, str]]:
@@ -76,8 +88,8 @@ def chat(cfg: dict[str, Any], messages: list[dict[str, str]], start_index: int =
         raise ProviderUnavailable("No active model locked. Run `metrics auth` first.")
     errors: list[str] = []
     with httpx.Client(transport=transport, timeout=120.0) as client:
-        for attempt in range(2):
-            rate_limited_only = True
+        for attempt in range(CHAIN_PASSES):
+            rate_limited, reset = False, 0.0
             for index in range(start_index, len(chain)):
                 provider, model = chain[index]
                 body = {"model": model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens}
@@ -85,17 +97,19 @@ def chat(cfg: dict[str, Any], messages: list[dict[str, str]], start_index: int =
                     resp = _call_model(client, cfg, provider, body)
                 except httpx.TransportError as exc:
                     errors.append(f"{provider}/{model}: {type(exc).__name__}")
-                    rate_limited_only = False
                     continue
                 if resp.status_code in RETRYABLE:
                     errors.append(f"{provider}/{model}: HTTP {resp.status_code}")
-                    rate_limited_only &= resp.status_code == 429
+                    if resp.status_code == 429:
+                        rate_limited, reset = True, max(reset, token_reset(resp) or 0.0)
                     continue
                 resp.raise_for_status()
                 content = resp.json()["choices"][0]["message"].get("content") or ""
                 return provider, model, content, index
-            if attempt == 0 and rate_limited_only:
-                time.sleep(CHAIN_COOLDOWN_S)  # every provider is rate-limited: wait once, then retry the chain
+            # A rate-limited model will recover once its token window refills (other failures, e.g. a crashed
+            # local fallback, must not prevent that wait).
+            if rate_limited and attempt < CHAIN_PASSES - 1:
+                time.sleep(min(max(CHAIN_COOLDOWN_S, reset), MAX_CHAIN_COOLDOWN_S))
                 continue
             break
     raise ProviderUnavailable("All models failed: " + "; ".join(errors))

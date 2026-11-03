@@ -190,3 +190,39 @@ def test_chat_5xx_fails_over_without_cooldown(cfg, sleeps):
 def test_chat_requires_locked_model():
     with pytest.raises(model_router.ProviderUnavailable):
         model_router.chat(copy.deepcopy(DEFAULT_CONFIG), [])
+
+
+def test_token_reset_header_parsing():
+    def resp(value):
+        return httpx.Response(429, headers={"x-ratelimit-reset-tokens": value})
+    assert llm_client.token_reset(resp("28.432s")) == pytest.approx(28.432)
+    assert llm_client.token_reset(resp("577ms")) == pytest.approx(0.577)
+    assert llm_client.token_reset(resp("1m2.5s")) == pytest.approx(62.5)
+    assert llm_client.token_reset(httpx.Response(429)) is None
+
+
+def test_cooldown_honours_announced_reset_even_when_a_fallback_errors(cfg, sleeps):
+    # Regression: an Ollama HTTP 500 used to cancel the chain cooldown, so a role failed instantly.
+    _chain(cfg, ("groq", "m1"), ("ollama", "local"))
+    calls = []
+
+    def handler(request):
+        model = json.loads(request.content)["model"]
+        calls.append(model)
+        if model == "local":
+            return httpx.Response(500, json={})
+        if calls.count("m1") <= 3:  # first pass: 3 rate-limited attempts on m1
+            return httpx.Response(429, headers={"x-ratelimit-reset-tokens": "41.5s"}, json={})
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+    assert model_router.chat(cfg, [], transport=httpx.MockTransport(handler))[2] == "ok"
+    assert sleeps == [1.5, 3.0, 41.5]
+
+
+def test_cooldown_is_capped(cfg, sleeps):
+    _chain(cfg, ("groq", "m1"))
+
+    def handler(request):
+        return httpx.Response(429, headers={"x-ratelimit-reset-tokens": "5m"}, json={})
+    with pytest.raises(model_router.ProviderUnavailable):
+        model_router.chat(cfg, [], transport=httpx.MockTransport(handler))
+    assert sleeps.count(llm_client.MAX_CHAIN_COOLDOWN_S) == llm_client.CHAIN_PASSES - 1
