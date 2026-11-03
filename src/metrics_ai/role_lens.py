@@ -64,10 +64,46 @@ def _has_number(text: str, value: str) -> bool:
     return bool(re.search(rf"(?<![\d.]){re.escape(value)}(?!\d)", text))
 
 
+# Component vocabulary each lens must name in [X] (role-generic words, never data values).
+X_COMPONENTS = {
+    "aiml": ("pars", "profil", "ast", "feature", "extraction", "cach", "memo"),
+    "backend": ("storage", "write", "persist", "ledger", "database", "sqlite", "transaction", "insert"),
+}
+
+
+NUMBER_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_.])(\d+(?:\.\d+)?)(?!\.?\d)")
+
+
+def _units_ok(combined: str, values: list[float], unit: str) -> bool:
+    """Every cited number equal to a measured value of this kind carries its unit ('3837.7 ms', '216.0 ms')."""
+    for match in NUMBER_TOKEN_RE.finditer(combined):
+        if any(abs(float(match.group(1)) - v) < 1e-9 for v in values):
+            if not re.match(rf"\s?{unit}\b", combined[match.end():], re.IGNORECASE):
+                return False
+    return True
+
+
 def lens_requirements(role: str, state: dict[str, Any]) -> list[tuple[str, Callable[[str, str, str], bool]]]:
     """Data-driven role contract as (instruction, check(x, z, combined)) pairs; values come from the state."""
     diff, delta = state["ast_structural_diff"], state["telemetry_delta"]
     reqs: list[tuple[str, Callable[[str, str, str], bool]]] = []
+    latency = [float(delta[s]["mean_latency_ms"]) for s in ("baseline", "target")
+               if delta.get(s, {}).get("mean_latency_ms") is not None]
+    memory = [float(delta[s]["peak_memory_mb"]) for s in ("baseline", "target")
+              if delta.get(s, {}).get("peak_memory_mb") is not None]
+    if latency:
+        reqs.append((f"write latency values with 'ms' (e.g. '{fmt_number(latency[0])} ms')",
+                     lambda x, z, c: _units_ok(c, latency, "ms")))
+    if memory:
+        reqs.append(("write memory values with 'MB'", lambda x, z, c: _units_ok(c, memory, "MB")))
+    speedup = f"{fmt_number(delta['speedup_multiplier_x'])}x" if delta.get("speedup_multiplier_x") is not None else ""
+    if role in X_COMPONENTS:
+        words = X_COMPONENTS[role]
+        reqs.append((f"[X] names the {role} component (a word like: {', '.join(words[:4])})",
+                     lambda x, z, c: any(w in x.lower() for w in words)))
+    if speedup and role in ("aiml", "backend", "tpm"):
+        reqs.append((f"[X] does not use the '{speedup}' multiplier (reserved for the mlops bullet)",
+                     lambda x, z, c: speedup not in x.lower()))
     if role == "aiml":
         caching = sorted(set(diff.get("caching_decorators_added", [])) | {
             d.split("::")[-1].split("@")[0].split(".")[-1] for d in diff.get("decorators_added", [])})

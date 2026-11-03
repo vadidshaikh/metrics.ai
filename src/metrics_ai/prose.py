@@ -177,6 +177,19 @@ def bare_identifier_objects(z: str, identifiers: set[str]) -> list[str]:
     return hits
 
 
+def stem_echoes(z: str, identifiers: set[str]) -> list[str]:
+    """A gerund whose stem the next identifier repeats ("executing executemany", "caching cached_profile")."""
+    idents = {i.lower() for i in identifiers}
+    hits = []
+    for clause in re.split(r",|\b(?:and|while)\s+(?=\w+ing\b)", z):
+        words = [w.strip(".").lower() for w in clause.split() if w.lower() not in {"and", "while"}]
+        if len(words) >= 2 and words[0].endswith("ing") and words[1] in idents:
+            stem = words[0][:-3][:5]
+            if len(stem) >= 4 and words[1].startswith(stem):
+                hits.append(f"{words[0]} {words[1]}")
+    return hits
+
+
 def lint_xyz(x: str, z: str, combined: str, identifiers: set[str] | None,
              mechanisms: list[str], y: str = "", unmeasured: list[str] | None = None) -> list[str]:
     """Return human-readable defects; an empty list means the bullet is accepted."""
@@ -185,6 +198,10 @@ def lint_xyz(x: str, z: str, combined: str, identifiers: set[str] | None,
     if repeated:
         problems.append(f"[X] and [Y] repeat {repeated}: X names the component and impact, Y the before/after "
                         "measurement; don't restate the same metric phrase")
+    echoed = stem_echoes(z, identifiers or set())
+    if echoed:
+        problems.append(f"{echoed}: the gerund repeats the identifier's stem; use a distinct verb (e.g. "
+                        "'memoizing cached_profile results', 'batching inserts via executemany')")
     bare = bare_identifier_objects(z, identifiers or set())
     if bare:
         problems.append(f"{bare}: give the gerund a real object and attach the identifier with 'via'/'with' "

@@ -199,8 +199,8 @@ def test_synthesize_rejects_a_clone_of_another_roles_bullet():
 
     first = _validate(_xyz())
     same_x_new_z = _xyz(z="consolidating per-row commits into one executemany transaction")
-    distinct = _xyz(x="a 5.7x ingest benchmark speedup",
-                    z="consolidating per-row commits into one executemany transaction", cited=(5.7, 1234.6, 216.0))
+    distinct = _xyz(x="a leaner SQLite storage write path",
+                    z="consolidating per-row commits into one executemany transaction", cited=(1234.6, 216.0))
     chat = FakeChat([json.dumps(_xyz()), json.dumps(same_x_new_z), json.dumps(distinct)])
     result = _run(chat, role="backend", others={"aiml": clone_key(first.model_dump())})
     assert result.attempts == 3
@@ -297,10 +297,15 @@ def test_role_lenses_are_data_driven_and_check_what_z_leads_with():
         return obj.x_accomplishment, obj.z_mechanism, obj.combined_xyz_bullet
 
     cache_first = "caching parsed source with lru_cache and batching inserts via executemany"
-    assert lens_violations("aiml", *bullet(), STATE)                         # Z leads with batching, not caching
-    assert not lens_violations("aiml", *bullet(z=cache_first), STATE)
-    assert not lens_violations("backend", *bullet(), STATE)                  # Z leads with executemany
+    aiml_x = "an 82.5% cut in AST-parsing ingest latency"
+    assert lens_violations("aiml", *bullet(x=aiml_x), STATE)                 # Z leads with batching, not caching
+    assert not lens_violations("aiml", *bullet(x=aiml_x, z=cache_first), STATE)
+    assert lens_violations("aiml", *bullet(z=cache_first), STATE)            # X names no parsing/profiling component
+    assert lens_violations("aiml", *bullet(x="a 5.7x AST-parsing speedup", z=cache_first), STATE)  # mlops' multiplier
+    assert not lens_violations("backend", *bullet(), STATE)                  # X says ledger; Z leads with executemany
     assert lens_violations("backend", *bullet(z=cache_first), STATE)
+    # Units: measured latency values must carry "ms".
+    assert lens_violations("backend", *bullet(y="mean latency falling from 1234.6 to 216.0"), STATE)
     assert lens_violations("mlops", *bullet(), STATE)                        # X lacks the 5.7x speedup
     mlops = bullet(x="a 5.7x ingest benchmark speedup", y="latency falling from 1234.6 ms to 216.0 ms "
                    "with peak RSS 17.1% lower", z="caching parses with lru_cache and batching via executemany")
@@ -335,3 +340,14 @@ def test_identifiers_as_modifiers_or_coordinated_with_nouns_are_allowed():
     assert bare_identifier_objects("hoisting insert_run and profile_source calls out of the loop", idents) == []
     assert bare_identifier_objects("batching via executemany and hoisting insert_run and profile_source",
                                    idents) == ["hoisting insert_run profile_source"]
+
+
+def test_gerund_may_not_echo_the_identifier_stem():
+    from metrics_ai.prose import stem_echoes
+
+    idents = {"executemany", "cached_profile", "lru_cache"}
+    assert stem_echoes("executing executemany for bulk inserts", idents) == ["executing executemany"]
+    assert stem_echoes("caching cached_profile results with lru_cache", idents) == ["caching cached_profile"]
+    assert stem_echoes("memoizing cached_profile results with lru_cache", idents) == []
+    with pytest.raises(ValidationError, match="repeats the identifier's stem"):
+        _validate(_xyz(z="executing executemany for bulk inserts and caching parses with lru_cache"))
