@@ -162,13 +162,18 @@ def repeated_phrases(x: str, y: str) -> list[str]:
 
 
 def bare_identifier_objects(z: str, identifiers: set[str]) -> list[str]:
-    """Gerunds whose direct object is a bare code identifier ("batching executemany")."""
+    """Gerund clauses whose whole object is bare code identifiers ("batching executemany").
+
+    Identifiers used as modifiers ("caching cached_profile results") or coordinated with a real noun
+    ("hoisting insert_run and profile_source calls") are fine; clauses split at commas and at
+    "and/while" only when a new gerund follows.
+    """
     idents = {i.lower() for i in identifiers}
     hits = []
-    for clause in re.split(r",|\band\b|\bwhile\b", z):
-        words = clause.split()
-        if len(words) >= 2 and words[0].lower().endswith("ing") and words[1].lower().strip(".") in idents:
-            hits.append(f"{words[0]} {words[1]}")
+    for clause in re.split(r",|\b(?:and|while)\s+(?=\w+ing\b)", z):
+        words = [w.strip(".").lower() for w in clause.split() if w.lower() not in {"and", "while"}]
+        if len(words) >= 2 and words[0].endswith("ing") and all(w in idents for w in words[1:]):
+            hits.append(" ".join(words))
     return hits
 
 

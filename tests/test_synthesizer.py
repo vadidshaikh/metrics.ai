@@ -192,15 +192,18 @@ def test_synthesize_reprompts_with_diagnostic_review_critique():
 
 
 def test_synthesize_rejects_a_clone_of_another_roles_bullet():
-    first = _validate(_xyz()).combined_xyz_bullet
+    from metrics_ai.synthesizer import clone_key
+
+    first = _validate(_xyz())
     distinct = _xyz(x="a 5.7x ingest benchmark speedup",
-                    y="latency falling from 1234.6 ms to 216.0 ms with peak RSS 17.1% lower",
-                    z="batching inserts via executemany and caching parses with lru_cache",
-                    cited=(5.7, 1234.6, 216.0, 17.1))
+                    z="batching inserts into one transaction via executemany while caching parses with lru_cache",
+                    cited=(5.7, 1234.6, 216.0))
     chat = FakeChat([json.dumps(_xyz()), json.dumps(distinct)])
-    result = _run(chat, role="backend", others={"aiml": first})
+    result = _run(chat, role="backend", others={"aiml": clone_key(first.model_dump())})
     assert result.attempts == 2 and "similar to the aiml bullet" in chat.calls[1][-1]["content"]
-    assert result.structured["combined_xyz_bullet"] != first
+    # Y is identical (same measured values) yet the bullet is accepted: only X/Z must differ.
+    assert result.structured["y_measurement"] == first.y_measurement
+    assert result.structured["combined_xyz_bullet"] != first.combined_xyz_bullet
 
 
 def test_synthesize_fails_over_after_exhausting_retries():
@@ -308,3 +311,13 @@ def test_redundant_x_y_and_bare_identifier_objects_are_rejected():
         _validate(_xyz(x="an 82.5% reduction in mean latency", y="mean latency falling from 1234.6 ms to 216.0 ms"))
     with pytest.raises(ValidationError, match="batching executemany"):
         _validate(_xyz(z="batching executemany and caching parsed source with lru_cache"))
+
+
+def test_identifiers_as_modifiers_or_coordinated_with_nouns_are_allowed():
+    from metrics_ai.prose import bare_identifier_objects
+
+    idents = {"executemany", "lru_cache", "cached_profile", "insert_run", "profile_source"}
+    assert bare_identifier_objects("caching cached_profile results with lru_cache", idents) == []
+    assert bare_identifier_objects("hoisting insert_run and profile_source calls out of the loop", idents) == []
+    assert bare_identifier_objects("batching via executemany and hoisting insert_run and profile_source",
+                                   idents) == ["hoisting insert_run profile_source"]

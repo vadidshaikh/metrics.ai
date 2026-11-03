@@ -134,8 +134,16 @@ def validation_context(state: dict[str, Any], allowed: set[float], fmt: str, den
             "unmeasured": unmeasured_terms(state.get("unmeasured_metrics", []))}
 
 
+def clone_key(structured: dict[str, Any]) -> str:
+    """What must differ between roles: the accomplishment [X] and mechanism [Z]. [Y] legitimately repeats
+    the same measured before/after values for every role, so it is excluded from the comparison."""
+    if "x_accomplishment" in structured:
+        return f"{structured['x_accomplishment']} | {structured['z_mechanism']}"
+    return " ".join(str(structured.get(k, "")) for k in ("situation", "task", "action", "result"))
+
+
 def too_similar(candidate: str, others: dict[str, str]) -> tuple[str, float] | None:
-    """The other role whose bullet this candidate nearly clones, if any."""
+    """The other role whose X/Z this candidate nearly clones, if any."""
     best = max(((role, difflib.SequenceMatcher(None, candidate.lower(), text.lower()).ratio())
                 for role, text in others.items()), key=lambda rt: rt[1], default=None)
     return best if best and best[1] >= CLONE_SIMILARITY else None
@@ -222,9 +230,9 @@ def synthesize(cfg: dict[str, Any], gate: DecisionGate, state: dict[str, Any], a
                         if fmt == "xyz" else [])
                 if lens:
                     raise ValueError("role lens not followed: " + "; ".join(lens))
-                clone = too_similar(candidate, others)
+                clone = too_similar(clone_key(obj.model_dump()), others)
                 if clone:
-                    raise ValueError(f"bullet is {clone[1]:.0%} similar to the {clone[0]} bullet "
+                    raise ValueError(f"[X]/[Z] are {clone[1]:.0%} similar to the {clone[0]} bullet's "
                                      f"'{others[clone[0]]}'. Lead with your own ROLE_LENS facet instead.")
             except (ValidationError, ValueError) as exc:  # JSONDecodeError is a ValueError
                 guard_retries += 1

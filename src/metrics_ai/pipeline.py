@@ -14,7 +14,7 @@ from metrics_ai.decision_gate import DecisionGate, GateUnavailable, route_roles,
 from metrics_ai.llm_judge import LlmJudge
 from metrics_ai.renderers import render_pr_md
 from metrics_ai.storage import Ledger
-from metrics_ai.synthesizer import SynthesisError, ledger_hash, synthesize
+from metrics_ai.synthesizer import SynthesisError, clone_key, ledger_hash, synthesize
 
 
 def pick_command(ledger: Ledger, base: str, tgt: str, command: Optional[str]) -> Optional[str]:
@@ -113,7 +113,7 @@ def generate(root: Path, cfg: dict[str, Any], ledger: Ledger, console: Console, 
             failed.append(target_role)
             continue
         review = result.review
-        produced[target_role] = result.structured.get("combined_xyz_bullet") or result.output_text
+        produced[target_role] = clone_key(result.structured)
         digest = ledger_hash(state, result.output_text)
         structured = {**result.structured, "gate": {
             "triage_mode": triage.gate_mode, "review_mode": review.gate_mode,
