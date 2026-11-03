@@ -223,3 +223,23 @@ def test_route_roles_and_weakest_mode():
     assert route_roles({"aiml": 0.2, "backend": 0.2, "mlops": 0.2, "tpm": 0.21}, "auto") == ["tpm"]
     assert route_roles({}, "all") == ["aiml", "backend", "mlops", "tpm"] and route_roles({}, "tpm") == ["tpm"]
     assert weakest(GATE_JEV, GATE_JUDGE) == GATE_JUDGE and weakest(GATE_JUDGE, GATE_OFFLINE) == GATE_OFFLINE
+
+
+def test_systemone_overload_529_is_retried_with_backoff(sleeps):
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        if len(calls) < 3:
+            return httpx.Response(529, json={"error": "server overloaded"})
+        return httpx.Response(200, json=TRIAGE_ANSWERS)
+    result = DecisionGate(DEFAULT_CONFIG, "k", transport=httpx.MockTransport(handler)).triage(make_state())
+    assert result.gate_mode == GATE_JEV and len(calls) == 3 and sleeps == [1.5, 3.0]
+
+
+def test_offline_gate_ignores_empty_derived_keys_and_telemetry_noise():
+    # Regression: a comment-only commit has {"signals": [], "mechanisms": []}; a noisy RSS sample on a tiny
+    # process (here -57.7% memory) must not make the offline gate call it a resume-worthy code change.
+    state = make_state(latency=(47.7, 45.8), memory=(14.5, 6.1), signals=())
+    state["ast_structural_diff"] = {"signals": [], "mechanisms": []}
+    assert offline_gate.triage(state)["worth_prob"] < 0.60

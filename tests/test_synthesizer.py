@@ -185,19 +185,21 @@ def test_synthesize_reprompts_with_diagnostic_review_critique():
 
     gate = MetricWrongOnce()
     chat = FakeChat([json.dumps(_xyz()), json.dumps(_xyz())])
-    result = _run(chat, gate=gate, role="mlops")
-    assert result.attempts == 2 and result.review.metric_prob == 0.93 and gate.calls == ["mlops", "mlops"]
+    result = _run(chat, gate=gate, role="backend")
+    assert result.attempts == 2 and result.review.metric_prob == 0.93 and gate.calls == ["backend", "backend"]
     feedback = chat.calls[1][-1]["content"]
     assert "metric=0.20" in feedback and "METRICS:" in feedback and "FLUENCY" not in feedback
 
 
 def test_synthesize_rejects_a_clone_of_another_roles_bullet():
     first = _validate(_xyz()).combined_xyz_bullet
-    distinct = _xyz(x="a 5.7x speedup in the ledger ingest benchmark",
-                    z="caching parsed source with lru_cache and batching inserts via executemany")
+    distinct = _xyz(x="a 5.7x ingest benchmark speedup",
+                    y="latency falling from 1234.6 ms to 216.0 ms with peak RSS 17.1% lower",
+                    z="batching inserts via executemany and caching parses with lru_cache",
+                    cited=(5.7, 1234.6, 216.0, 17.1))
     chat = FakeChat([json.dumps(_xyz()), json.dumps(distinct)])
-    result = _run(chat, role="mlops", others={"backend": first})
-    assert result.attempts == 2 and "similar to the backend bullet" in chat.calls[1][-1]["content"]
+    result = _run(chat, role="backend", others={"aiml": first})
+    assert result.attempts == 2 and "similar to the aiml bullet" in chat.calls[1][-1]["content"]
     assert result.structured["combined_xyz_bullet"] != first
 
 
@@ -268,3 +270,27 @@ def test_star_rejects_single_sample_and_accepts_iteration_count():
                                     context=ctx)
     with pytest.raises(ValidationError, match="multiplier misuse"):
         StarResponse.model_validate({**star, "result": "Latency saw a 5.7x reduction."}, context=ctx)
+
+
+def test_role_lenses_are_data_driven_and_check_what_z_leads_with():
+    from metrics_ai.synthesizer import build_messages, lens_violations
+
+    def bullet(**kw):
+        obj = _validate(_xyz(**kw))
+        return obj.x_accomplishment, obj.z_mechanism, obj.combined_xyz_bullet
+
+    cache_first = "caching parsed source with lru_cache and batching inserts via executemany"
+    assert lens_violations("aiml", *bullet(), STATE)                         # Z leads with batching, not caching
+    assert not lens_violations("aiml", *bullet(z=cache_first), STATE)
+    assert not lens_violations("backend", *bullet(), STATE)                  # Z leads with executemany
+    assert lens_violations("backend", *bullet(z=cache_first), STATE)
+    assert lens_violations("mlops", *bullet(), STATE)                        # X lacks the 5.7x speedup
+    mlops = bullet(x="a 5.7x ingest benchmark speedup", y="latency falling from 1234.6 ms to 216.0 ms "
+                   "with peak RSS 17.1% lower", z="caching parses with lru_cache and batching via executemany")
+    assert not lens_violations("mlops", *mlops, STATE)
+    assert not lens_violations("tpm", *bullet(), STATE)                      # X leads with 82.5%
+    assert lens_violations("tpm", *mlops, STATE)
+    assert lens_violations("tpm", *bullet(x="an 82.5% ingest latency reduction meeting the SLA"), STATE)
+    # The requirements reach the prompt with values computed from the state, never hardcoded.
+    content = build_messages(STATE, ALLOWED, "xyz", "mlops", "standard")[1]["content"]
+    assert "'5.7x' speedup" in content and "'17.1%' or '40 MB'" in content

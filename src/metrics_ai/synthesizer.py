@@ -5,6 +5,7 @@ from __future__ import annotations
 import difflib
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -32,7 +33,8 @@ ROLE_LENS = {
     "mlops": "an MLOps/platform engineer. Lead with the profiled benchmark runtime: the speedup multiplier "
              "together with the peak-memory (RSS) change and the complexity trend.",
     "tpm": "a technical program manager. Lead with the end-to-end outcome: the latency reduction percentage "
-           "with its before/after values, framed as delivery/SLA impact and maintainability.",
+           "with its before/after values, framed as delivery impact and maintainability. Never claim an SLA, "
+           "target or deadline was defined or met; none is in the data.",
 }
 
 SYSTEM_PROMPT = """You convert measured engineering telemetry into resume/interview artifacts.
@@ -102,6 +104,7 @@ def build_messages(state: dict[str, Any], allowed: set[float], fmt: str, role: s
                 f"Return JSON shaped {STAR_SHAPE}.")
     payload = {
         "ROLE_LENS": ROLE_LENS[role],
+        "ROLE_REQUIREMENTS": [text for text, _check in lens_requirements(role, state)] if fmt == "xyz" else [],
         "ALLOWED_NUMBERS": [fmt_number(n) for n in sorted(allowed)],
         "MEASURED_METRICS": state.get("measured_metrics", []),
         "UNMEASURED_METRICS": state.get("unmeasured_metrics", []),
@@ -138,6 +141,53 @@ def too_similar(candidate: str, others: dict[str, str]) -> tuple[str, float] | N
     return best if best and best[1] >= CLONE_SIMILARITY else None
 
 
+SLA_CLAIM_RE = re.compile(r"\b(meet|meets|meeting|met|hit|hitting|achiev\w*)\s+(an?\s+|the\s+)?(sla|slo|target)",
+                          re.IGNORECASE)
+
+
+def _first_clause(z: str) -> str:
+    return re.split(r",|\band\b|\bwhile\b", z, maxsplit=1)[0].lower()
+
+
+def _has_number(text: str, value: str) -> bool:
+    return bool(re.search(rf"(?<![\d.]){re.escape(value)}(?!\d)", text))
+
+
+def lens_requirements(role: str, state: dict[str, Any]) -> list[tuple[str, Callable[[str, str, str], bool]]]:
+    """Data-driven role contract as (instruction, check(x, z, combined)) pairs; values come from the state."""
+    diff, delta = state["ast_structural_diff"], state["telemetry_delta"]
+    reqs: list[tuple[str, Callable[[str, str, str], bool]]] = []
+    if role == "aiml":
+        caching = sorted(set(diff.get("caching_decorators_added", [])) | {
+            d.split("::")[-1].split("@")[0].split(".")[-1] for d in diff.get("decorators_added", [])})
+        if caching:
+            reqs.append((f"[Z]'s FIRST clause is the caching change, naming {' or '.join(caching)}",
+                         lambda x, z, c: any(n.lower() in _first_clause(z) for n in caching)))
+    elif role == "backend":
+        batching = diff.get("batching_calls_added", [])
+        if batching:
+            reqs.append((f"[Z]'s FIRST clause is the batched-write change, naming {' or '.join(batching)}",
+                         lambda x, z, c: any(b.lower() in _first_clause(z) for b in batching)))
+    elif role == "mlops":
+        if delta.get("speedup_multiplier_x") is not None:
+            speedup = f"{fmt_number(delta['speedup_multiplier_x'])}x"
+            reqs.append((f"[X] contains the measured '{speedup}' speedup", lambda x, z, c: speedup in x.lower()))
+        if delta.get("memory_delta_pct") is not None:
+            pct, mb = fmt_number(abs(delta["memory_delta_pct"])), fmt_number(delta["target"]["peak_memory_mb"])
+            reqs.append((f"cite the peak-memory change as '{pct}%' or '{mb} MB' (e.g. in [Y]: '... with peak RSS "
+                         f"down {pct}%')", lambda x, z, c: _has_number(c, pct) or _has_number(c, mb)))
+    elif role == "tpm":
+        if delta.get("latency_delta_pct") is not None:
+            pct = f"{fmt_number(abs(delta['latency_delta_pct']))}%"
+            reqs.append((f"[X] contains the end-to-end '{pct}' latency reduction", lambda x, z, c: pct in x))
+        reqs.append(("never claim an SLA/target was met", lambda x, z, c: not SLA_CLAIM_RE.search(c)))
+    return reqs
+
+
+def lens_violations(role: str, x: str, z: str, combined: str, state: dict[str, Any]) -> list[str]:
+    return [f"{role} lens: {text}" for text, ok in lens_requirements(role, state) if not ok(x, z, combined)]
+
+
 def review_feedback(review: ReviewResult) -> str:
     return (f"Rejected by the {review.gate_mode} Stage-3 review (faithful={review.faithful_prob:.2f}, "
             f"metric={review.metric_prob:.2f}, natural={review.natural_prob:.2f}; each must be >= 0.80).\n"
@@ -168,6 +218,10 @@ def synthesize(cfg: dict[str, Any], gate: DecisionGate, state: dict[str, Any], a
             try:
                 obj = schema.model_validate(parse_json(text), context=context)
                 candidate = obj.combined_xyz_bullet if fmt == "xyz" else render_star(obj)
+                lens = (lens_violations(role, obj.x_accomplishment, obj.z_mechanism, candidate, state)
+                        if fmt == "xyz" else [])
+                if lens:
+                    raise ValueError("role lens not followed: " + "; ".join(lens))
                 clone = too_similar(candidate, others)
                 if clone:
                     raise ValueError(f"bullet is {clone[1]:.0%} similar to the {clone[0]} bullet "

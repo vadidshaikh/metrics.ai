@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -19,10 +20,12 @@ from metrics_ai import offline_gate
 from metrics_ai.config import OPENJEV_ENDPOINT, OPENJEV_MODEL
 from metrics_ai.gate_questions import (REVIEW_CRITIQUES, REVIEW_QUESTIONS, ROLES, TRIAGE_QUESTIONS,
                                        normalize_distribution, normalize_tier)
+from metrics_ai.llm_client import BACKOFF_S
 from metrics_ai.llm_judge import JudgeError, LlmJudge
 
 GATE_JEV, GATE_JUDGE, GATE_OFFLINE = "jev_api", "llm_judge", "offline_heuristic"
 GATE_RANK = {GATE_OFFLINE: 0, GATE_JUDGE: 1, GATE_JEV: 2}
+TRANSIENT = {429, 502, 503, 529}  # 529 = OpenJev "server overloaded"
 
 
 class GateUnavailable(RuntimeError):
@@ -135,10 +138,16 @@ class DecisionGate:
         self._review_cache: dict[str, ReviewResult] = {}
 
     def _post(self, state: dict[str, Any], questions: dict[str, Any]) -> dict[str, Any]:
+        """POST to SystemOne, backing off 1.5 s then 3.0 s on rate-limit/overload (429/502/503/529)."""
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
         payload = {"model": self.model, "state": state, "questions": questions}
         with httpx.Client(timeout=self.timeout, transport=self.transport) as client:
             resp = client.post(self.endpoint, json=payload, headers=headers)
+            for wait in BACKOFF_S:
+                if resp.status_code not in TRANSIENT:
+                    break
+                time.sleep(wait)
+                resp = client.post(self.endpoint, json=payload, headers=headers)
             resp.raise_for_status()
             return resp.json()
 

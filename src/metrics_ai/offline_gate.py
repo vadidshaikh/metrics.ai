@@ -52,7 +52,9 @@ def triage(state: dict[str, Any]) -> dict[str, Any]:
     delta = state["telemetry_delta"]
     diff = state["ast_structural_diff"]
     signals = diff.get("signals", [])
-    code_change = bool(signals) or any(k != "signals" for k in diff)
+    # A real structural change is a non-empty diff entry; derived keys (signals/mechanisms) don't count on
+    # their own, and an empty list must never be read as "the code changed".
+    code_change = bool(signals) or any(v for k, v in diff.items() if k not in ("signals", "mechanisms"))
     latency_red = _neg(delta.get("latency_delta_pct"))
     throughput_gain = _num(delta.get("throughput_delta_pct"))
     gains = [g for g in (latency_red, _neg(delta.get("memory_delta_pct")), throughput_gain,
