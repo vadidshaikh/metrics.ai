@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 from typing import Any, Callable
 
@@ -54,8 +55,24 @@ class LlmJudge:
         self.chat = chat or model_router.chat
         self.last_model = ""
 
+    def judge_cfg(self, exclude_model: str = "") -> dict[str, Any]:
+        """Config whose model chain omits `exclude_model`, so a model never grades its own output.
+
+        Models are compared by ID, so the same model served by a different provider is still excluded.
+        """
+        if not exclude_model:
+            return self.cfg
+        chain = [(p, m) for p, m in model_router.model_chain(self.cfg) if m != exclude_model]
+        if not chain:
+            raise JudgeError(f"no verified model other than {exclude_model} is available to judge it")
+        cfg = copy.deepcopy(self.cfg)
+        cfg["router"].update(active_provider=chain[0][0], active_model=chain[0][1],
+                             fallback_models=[{"provider": p, "model": m} for p, m in chain[1:]])
+        return cfg
+
     def _ask(self, schema: type[BaseModel], shape: str, state: dict[str, Any],
-             questions: dict[str, Any]) -> BaseModel:
+             questions: dict[str, Any], exclude_model: str = "") -> BaseModel:
+        cfg = self.judge_cfg(exclude_model)
         messages = [
             {"role": "system", "content": JUDGE_SYSTEM},
             {"role": "user", "content": json.dumps({"STATE": state, "QUESTIONS": questions,
@@ -64,7 +81,7 @@ class LlmJudge:
         errors = []
         for _ in range(MAX_JUDGE_ATTEMPTS):
             try:
-                provider, model, text, _ = self.chat(self.cfg, messages, temperature=0.0, max_tokens=3000)
+                provider, model, text, _ = self.chat(cfg, messages, temperature=0.0, max_tokens=3000)
             except model_router.ProviderUnavailable as exc:
                 raise JudgeError(str(exc)) from exc
             self.last_model = f"{provider}/{model}"
@@ -79,5 +96,6 @@ class LlmJudge:
     def triage(self, state: dict[str, Any], questions: dict[str, Any]) -> TriageJudgment:
         return self._ask(TriageJudgment, TRIAGE_SCHEMA, state, questions)
 
-    def review(self, state: dict[str, Any], questions: dict[str, Any]) -> ReviewJudgment:
-        return self._ask(ReviewJudgment, REVIEW_SCHEMA, state, questions)
+    def review(self, state: dict[str, Any], questions: dict[str, Any], generator_model: str = "") -> ReviewJudgment:
+        """Stage-3 verdict from a model other than `generator_model` (the one that wrote the candidate)."""
+        return self._ask(ReviewJudgment, REVIEW_SCHEMA, state, questions, exclude_model=generator_model)

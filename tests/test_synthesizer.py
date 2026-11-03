@@ -175,7 +175,8 @@ def test_synthesize_reprompts_with_diagnostic_review_critique():
         def __init__(self):
             self.calls = []
 
-        def review(self, state, z, candidate, role):
+        def review(self, state, z, candidate, role, generator_model=""):
+            assert generator_model == "model-0"  # the synthesizer tells the gate who wrote the candidate
             self.calls.append(role)
             if len(self.calls) == 1:
                 bad = ReviewResult(0.95, 0.2, 0.9, "jev_api")
@@ -194,16 +195,29 @@ def test_synthesize_reprompts_with_diagnostic_review_critique():
 def test_synthesize_rejects_a_clone_of_another_roles_bullet():
     from metrics_ai.synthesizer import clone_key
 
+    from metrics_ai.synthesizer import _ratio
+
     first = _validate(_xyz())
+    same_x_new_z = _xyz(z="consolidating per-row commits into one executemany transaction")
     distinct = _xyz(x="a 5.7x ingest benchmark speedup",
-                    z="batching inserts into one transaction via executemany while caching parses with lru_cache",
-                    cited=(5.7, 1234.6, 216.0))
-    chat = FakeChat([json.dumps(_xyz()), json.dumps(distinct)])
+                    z="consolidating per-row commits into one executemany transaction", cited=(5.7, 1234.6, 216.0))
+    chat = FakeChat([json.dumps(_xyz()), json.dumps(same_x_new_z), json.dumps(distinct)])
     result = _run(chat, role="backend", others={"aiml": clone_key(first.model_dump())})
-    assert result.attempts == 2 and "similar to the aiml bullet" in chat.calls[1][-1]["content"]
-    # Y is identical (same measured values) yet the bullet is accepted: only X/Z must differ.
+    assert result.attempts == 3
+    assert "[Z] is 100% similar to the aiml [Z]" in chat.calls[1][-1]["content"] or \
+        "[X] is 100% similar to the aiml [X]" in chat.calls[1][-1]["content"]
+    assert "[X] is 100% similar to the aiml [X]" in chat.calls[2][-1]["content"]  # a new Z alone is not enough
+    # [Y] is identical (same measured values) yet the bullet is accepted: only [X] and [Z] must differ.
     assert result.structured["y_measurement"] == first.y_measurement
-    assert result.structured["combined_xyz_bullet"] != first.combined_xyz_bullet
+    for part in ("x_accomplishment", "z_mechanism"):
+        assert _ratio(result.structured[part], first.model_dump()[part]) < 0.70
+
+
+def test_prompt_shows_other_roles_bullets():
+    others = {"aiml": {"x": "a faster parsing pipeline", "z": "caching parses with lru_cache"}}
+    content = build_messages(STATE, ALLOWED, "xyz", "tpm", "standard", others)[1]["content"]
+    assert "OTHER_ROLES_ALREADY_WRITTEN" in content and "a faster parsing pipeline" in content
+    assert "OTHER_ROLES_ALREADY_WRITTEN" not in build_messages(STATE, ALLOWED, "xyz", "tpm", "standard")[1]["content"]
 
 
 def test_synthesize_fails_over_after_exhausting_retries():

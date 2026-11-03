@@ -89,14 +89,6 @@ def commit_record(repo: git.Repo, target: str, baseline: str | None = None) -> d
     }
 
 
-def head_stub(repo: git.Repo) -> dict[str, Any]:
-    """Minimal commits row for HEAD so telemetry can be FK-linked before a full diff."""
-    head = repo.head.commit
-    return {"sha": head.hexsha, "parent_sha": head.parents[0].hexsha if head.parents else None,
-            "author": f"{head.author.name} <{head.author.email}>", "timestamp": int(head.committed_date),
-            "message": head.message.strip()}
-
-
 def pct_delta(before: float | None, after: float | None) -> float | None:
     if before in (None, 0) or after is None:
         return None

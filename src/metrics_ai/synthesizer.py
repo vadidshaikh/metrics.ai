@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import difflib
 import hashlib
 import json
-import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -17,25 +15,13 @@ from metrics_ai.decision_gate import DecisionGate, ReviewResult
 from metrics_ai.model_router import parse_json
 from metrics_ai.prose import unmeasured_terms
 from metrics_ai.renderers import render_star, render_xyz
+from metrics_ai.role_lens import (CLONE_LIMITS, ROLE_LENS, _ratio, clone_key, fmt_number,  # noqa: F401
+                                  lens_requirements, lens_violations, too_similar)
 from metrics_ai.schemas import DENSITY_RANGES, StarResponse, XyzResponse
 
 MAX_GUARD_RETRIES = 3
 MAX_REVIEW_RETRIES = 2
-CLONE_SIMILARITY = 0.80  # a role's bullet may not be this similar to another role's bullet in the same run
 XYZ_OVERHEAD = len("Accomplished  as measured by , by .")
-
-# Each lens names a *facet* to lead with; the numbers always come from the measured state.
-ROLE_LENS = {
-    "aiml": "an AI/ML engineer. Lead with the data-processing side: caching or memoizing repeated parsing / "
-            "feature extraction and removing redundant per-record work in the pipeline.",
-    "backend": "a backend engineer. Lead with persistence architecture: batched/bulk database writes in one "
-               "transaction replacing per-row writes, and hoisting loop-invariant calls.",
-    "mlops": "an MLOps/platform engineer. Lead with the profiled benchmark runtime: the speedup multiplier "
-             "together with the peak-memory (RSS) change and the complexity trend.",
-    "tpm": "a technical program manager. Lead with the end-to-end outcome: the latency reduction percentage "
-           "with its before/after values, framed as delivery impact and maintainability. Never claim an SLA, "
-           "target or deadline was defined or met; none is in the data.",
-}
 
 SYSTEM_PROMPT = """You convert measured engineering telemetry into resume/interview artifacts.
 HARD RULES:
@@ -69,10 +55,6 @@ class SynthesisResult:
     errors: list[str] = field(default_factory=list)
 
 
-def fmt_number(value: float) -> str:
-    return str(int(value)) if float(value).is_integer() else f"{value:.1f}"
-
-
 def _xyz_task(density: str) -> str:
     lo, hi = DENSITY_RANGES[density]
     return (
@@ -91,8 +73,8 @@ def _xyz_task(density: str) -> str:
         f"Return JSON shaped {XYZ_SHAPE}.")
 
 
-def build_messages(state: dict[str, Any], allowed: set[float], fmt: str, role: str,
-                   density: str) -> list[dict[str, str]]:
+def build_messages(state: dict[str, Any], allowed: set[float], fmt: str, role: str, density: str,
+                   others: dict[str, dict[str, str]] | None = None) -> list[dict[str, str]]:
     diff = state["ast_structural_diff"]
     if fmt == "xyz":
         task = _xyz_task(density)
@@ -118,6 +100,11 @@ def build_messages(state: dict[str, Any], allowed: set[float], fmt: str, role: s
         "NOTE": "Negative *_delta_pct means the value went down (lower latency/memory is better). "
                 "benchmark_iterations is how many timed runs each mean aggregates.",
     }
+    if others:
+        payload["OTHER_ROLES_ALREADY_WRITTEN"] = {
+            "rule": "Your [X] and your [Z] must EACH be worded clearly differently (under 70% similar) from "
+                    "every entry below: name a different component in [X] and lead [Z] with a different mechanism.",
+            "bullets": others}
     return [{"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": f"Write for {ROLE_LENS[role]}\n{task}\n\n{json.dumps(payload, indent=1)}"}]
 
@@ -134,68 +121,6 @@ def validation_context(state: dict[str, Any], allowed: set[float], fmt: str, den
             "unmeasured": unmeasured_terms(state.get("unmeasured_metrics", []))}
 
 
-def clone_key(structured: dict[str, Any]) -> str:
-    """What must differ between roles: the accomplishment [X] and mechanism [Z]. [Y] legitimately repeats
-    the same measured before/after values for every role, so it is excluded from the comparison."""
-    if "x_accomplishment" in structured:
-        return f"{structured['x_accomplishment']} | {structured['z_mechanism']}"
-    return " ".join(str(structured.get(k, "")) for k in ("situation", "task", "action", "result"))
-
-
-def too_similar(candidate: str, others: dict[str, str]) -> tuple[str, float] | None:
-    """The other role whose X/Z this candidate nearly clones, if any."""
-    best = max(((role, difflib.SequenceMatcher(None, candidate.lower(), text.lower()).ratio())
-                for role, text in others.items()), key=lambda rt: rt[1], default=None)
-    return best if best and best[1] >= CLONE_SIMILARITY else None
-
-
-SLA_CLAIM_RE = re.compile(r"\b(meet|meets|meeting|met|hit|hitting|achiev\w*)\s+(an?\s+|the\s+)?(sla|slo|target)",
-                          re.IGNORECASE)
-
-
-def _first_clause(z: str) -> str:
-    return re.split(r",|\band\b|\bwhile\b", z, maxsplit=1)[0].lower()
-
-
-def _has_number(text: str, value: str) -> bool:
-    return bool(re.search(rf"(?<![\d.]){re.escape(value)}(?!\d)", text))
-
-
-def lens_requirements(role: str, state: dict[str, Any]) -> list[tuple[str, Callable[[str, str, str], bool]]]:
-    """Data-driven role contract as (instruction, check(x, z, combined)) pairs; values come from the state."""
-    diff, delta = state["ast_structural_diff"], state["telemetry_delta"]
-    reqs: list[tuple[str, Callable[[str, str, str], bool]]] = []
-    if role == "aiml":
-        caching = sorted(set(diff.get("caching_decorators_added", [])) | {
-            d.split("::")[-1].split("@")[0].split(".")[-1] for d in diff.get("decorators_added", [])})
-        if caching:
-            reqs.append((f"[Z]'s FIRST clause is the caching change, naming {' or '.join(caching)}",
-                         lambda x, z, c: any(n.lower() in _first_clause(z) for n in caching)))
-    elif role == "backend":
-        batching = diff.get("batching_calls_added", [])
-        if batching:
-            reqs.append((f"[Z]'s FIRST clause is the batched-write change, naming {' or '.join(batching)}",
-                         lambda x, z, c: any(b.lower() in _first_clause(z) for b in batching)))
-    elif role == "mlops":
-        if delta.get("speedup_multiplier_x") is not None:
-            speedup = f"{fmt_number(delta['speedup_multiplier_x'])}x"
-            reqs.append((f"[X] contains the measured '{speedup}' speedup", lambda x, z, c: speedup in x.lower()))
-        if delta.get("memory_delta_pct") is not None:
-            pct, mb = fmt_number(abs(delta["memory_delta_pct"])), fmt_number(delta["target"]["peak_memory_mb"])
-            reqs.append((f"cite the peak-memory change as '{pct}%' or '{mb} MB' (e.g. in [Y]: '... with peak RSS "
-                         f"down {pct}%')", lambda x, z, c: _has_number(c, pct) or _has_number(c, mb)))
-    elif role == "tpm":
-        if delta.get("latency_delta_pct") is not None:
-            pct = f"{fmt_number(abs(delta['latency_delta_pct']))}%"
-            reqs.append((f"[X] contains the end-to-end '{pct}' latency reduction", lambda x, z, c: pct in x))
-        reqs.append(("never claim an SLA/target was met", lambda x, z, c: not SLA_CLAIM_RE.search(c)))
-    return reqs
-
-
-def lens_violations(role: str, x: str, z: str, combined: str, state: dict[str, Any]) -> list[str]:
-    return [f"{role} lens: {text}" for text, ok in lens_requirements(role, state) if not ok(x, z, combined)]
-
-
 def review_feedback(review: ReviewResult) -> str:
     return (f"Rejected by the {review.gate_mode} Stage-3 review (faithful={review.faithful_prob:.2f}, "
             f"metric={review.metric_prob:.2f}, natural={review.natural_prob:.2f}; each must be >= 0.80).\n"
@@ -204,7 +129,8 @@ def review_feedback(review: ReviewResult) -> str:
 
 def synthesize(cfg: dict[str, Any], gate: DecisionGate, state: dict[str, Any], allowed: set[float],
                fmt: str, role: str, density: str, chat: Callable[..., tuple[str, str, str, int]] | None = None,
-               log: Callable[[str], None] = lambda _m: None, others: dict[str, str] | None = None) -> SynthesisResult:
+               log: Callable[[str], None] = lambda _m: None,
+               others: dict[str, dict[str, str]] | None = None) -> SynthesisResult:
     """One artifact: numeric/prose/clone guard (3 retries), Stage-3 review (2 retries), model failover.
 
     `others` maps role -> bullet already produced in this run, so roles never receive cloned bullets.
@@ -217,7 +143,7 @@ def synthesize(cfg: dict[str, Any], gate: DecisionGate, state: dict[str, Any], a
     errors: list[str] = []
     attempts = index = 0
     while index < chain_len:
-        messages = build_messages(state, allowed, fmt, role, density)
+        messages = build_messages(state, allowed, fmt, role, density, others)
         guard_retries = review_retries = 0
         while True:
             attempts += 1
@@ -232,8 +158,10 @@ def synthesize(cfg: dict[str, Any], gate: DecisionGate, state: dict[str, Any], a
                     raise ValueError("role lens not followed: " + "; ".join(lens))
                 clone = too_similar(clone_key(obj.model_dump()), others)
                 if clone:
-                    raise ValueError(f"[X]/[Z] are {clone[1]:.0%} similar to the {clone[0]} bullet's "
-                                     f"'{others[clone[0]]}'. Lead with your own ROLE_LENS facet instead.")
+                    role_, part, ratio = clone
+                    label = {"x": "[X]", "z": "[Z]", "text": "answer"}[part]
+                    raise ValueError(f"{label} is {ratio:.0%} similar to the {role_} {label} '{others[role_][part]}' "
+                                     f"(limit {CLONE_LIMITS[part]:.0%}). Reword it around your own ROLE_LENS facet.")
             except (ValidationError, ValueError) as exc:  # JSONDecodeError is a ValueError
                 guard_retries += 1
                 errors.append(f"{model}: {str(exc).splitlines()[0][:200]}")
@@ -244,7 +172,7 @@ def synthesize(cfg: dict[str, Any], gate: DecisionGate, state: dict[str, Any], a
                                  "Fix every listed problem. Use ONLY ALLOWED_NUMBERS verbatim; JSON only."})
                 continue
             z = obj.z_mechanism if fmt == "xyz" else obj.action
-            review = gate.review(state, z, candidate, role)
+            review = gate.review(state, z, candidate, role, generator_model=model)
             if review.failures(gate.thresholds):
                 review_retries += 1
                 errors.append(f"{model}: review f={review.faithful_prob:.2f} m={review.metric_prob:.2f} "

@@ -105,10 +105,11 @@ def auth(groq_key: Optional[str] = typer.Option(None, "--groq-key"),
 
 
 def _record_head(ledger: Ledger, root: Path) -> str:
+    """Record HEAD with its full AST/complexity diff against its parent, so no commits column is left null."""
     with collector.open_repo(root) as repo:
-        stub = collector.head_stub(repo)
-    ledger.upsert_commit(stub)
-    return stub["sha"]
+        record = collector.commit_record(repo, "HEAD")
+    ledger.upsert_commit(record)
+    return record["sha"]
 
 
 @app.command()

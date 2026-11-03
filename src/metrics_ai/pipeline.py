@@ -103,7 +103,7 @@ def generate(root: Path, cfg: dict[str, Any], ledger: Ledger, console: Console, 
         return route_roles(triage.role_distribution, role)
 
     failed: list[str] = []
-    produced: dict[str, str] = {}  # role -> bullet, so later roles are not clones of earlier ones
+    produced: dict[str, dict[str, str]] = {}  # role -> its [X]/[Z], so later roles never clone earlier ones
     for target_role in route_roles(triage.role_distribution, role):
         try:
             result = synthesize(cfg, gate, state, allowed, fmt, target_role, density,
@@ -118,7 +118,8 @@ def generate(root: Path, cfg: dict[str, Any], ledger: Ledger, console: Console, 
         structured = {**result.structured, "gate": {
             "triage_mode": triage.gate_mode, "review_mode": review.gate_mode,
             "faithful_prob": review.faithful_prob, "metric_prob": review.metric_prob,
-            "natural_prob": review.natural_prob, "critique": review.critique, "attempts": result.attempts}}
+            "natural_prob": review.natural_prob, "critique": review.critique, "attempts": result.attempts,
+            "generator_model": f"{result.provider}/{result.model}", "judge_model": review.judge_model}}
         ledger.insert_impact({**base_row, "role": target_role,
                               "gate_mode": weakest(triage.gate_mode, review.gate_mode),
                               "jev_role_prob": triage.role_distribution.get(target_role),
@@ -127,7 +128,8 @@ def generate(root: Path, cfg: dict[str, Any], ledger: Ledger, console: Console, 
                               "output_text": result.output_text, "structured_json": structured, "ledger_hash": digest})
         console.print(artifact_panel(
             f"{fmt.upper()} · {target_role}", result.output_text,
-            f"{result.provider}/{result.model} · {review.gate_mode} faithful={review.faithful_prob:.2f} "
+            f"{result.provider}/{result.model} · {review.gate_mode} judge={review.judge_model} "
+            f"faithful={review.faithful_prob:.2f} "
             f"metric={review.metric_prob:.2f} natural={review.natural_prob:.2f} · attempts={result.attempts} "
             f"· hash={digest[:12]}"))
         console.print(json.dumps({"role": target_role, "cited_numbers": result.structured["cited_numbers"]}))

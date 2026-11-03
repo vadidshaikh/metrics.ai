@@ -142,3 +142,13 @@ def test_jev_request_prints_playground_body_and_response_is_accepted(repo, monke
                                  "best_fit_role": {"distribution": {"backend": 1.0}}}), encoding="utf-8")
     result = runner.invoke(app, ["generate", "--format", "xyz", "--jev-response", str(reply)])
     assert "gate_mode: jev_api" in result.output and "Synthesis halted" in result.output
+
+
+def test_wrap_records_full_commit_diff_so_no_commit_column_is_null(repo, monkeypatch):
+    root = _wrap_both(repo, monkeypatch)
+    commits = Ledger(root / ".metrics" / "ledger.db").dump()["commits"]
+    assert len(commits) == 2
+    for row in commits:
+        assert None not in (row["cyclomatic_before"], row["cyclomatic_after"], row["loc_delta"]), row
+    target = next(c for c in commits if c["sha"] == repo.head.commit.hexsha)
+    assert "batched_operations_added" in json.loads(target["ast_diff_json"])["signals"]

@@ -37,11 +37,12 @@ class FakeJudgeChat:
         self.calls = []
 
     def __call__(self, cfg, messages, **kwargs):
-        self.calls.append({"messages": copy.deepcopy(messages), **kwargs})
+        self.calls.append({"messages": copy.deepcopy(messages), "cfg": copy.deepcopy(cfg), **kwargs})
         reply = self.replies.pop(0)
         if isinstance(reply, Exception):
             raise reply
-        return "groq", "judge-model", reply, 0
+        router = cfg.get("router", {})
+        return router.get("active_provider") or "groq", router.get("active_model") or "judge-model", reply, 0
 
 
 TRIAGE_REPLY = json.dumps({"is_resume_worthy": 0.92, "impact_tier": 3.6, "critique": "solid",
@@ -243,3 +244,49 @@ def test_offline_gate_ignores_empty_derived_keys_and_telemetry_noise():
     state = make_state(latency=(47.7, 45.8), memory=(14.5, 6.1), signals=())
     state["ast_structural_diff"] = {"signals": [], "mechanisms": []}
     assert offline_gate.triage(state)["worth_prob"] < 0.60
+
+
+# ---- Stage-3 judge independence -----------------------------------------------------------
+REVIEW_REPLY = json.dumps({"is_mechanically_faithful": 0.95, "is_metric_accurate": 0.95, "is_prose_natural": 0.9})
+
+
+def _pool_cfg(*models):
+    cfg = copy.deepcopy(DEFAULT_CONFIG)
+    (p0, m0), *rest = models
+    cfg["router"].update(active_provider=p0, active_model=m0,
+                         fallback_models=[{"provider": p, "model": m} for p, m in rest])
+    return cfg
+
+
+def test_llm_judge_never_reviews_its_own_output():
+    cfg = _pool_cfg(("groq", "openai/gpt-oss-120b"), ("groq", "qwen/qwen3.8-27b"), ("groq", "openai/gpt-oss-20b"))
+    for generator, expected_judge in (("openai/gpt-oss-120b", "qwen/qwen3.8-27b"),
+                                      ("qwen/qwen3.8-27b", "openai/gpt-oss-120b")):
+        chat = FakeJudgeChat([REVIEW_REPLY])
+        gate = DecisionGate(cfg, judge=LlmJudge(cfg, chat=chat))
+        review = gate.review(make_state(), "z", "candidate", "backend", generator_model=generator)
+        used = chat.calls[0]["cfg"]["router"]
+        assert used["active_model"] == expected_judge
+        assert generator not in [used["active_model"], *[f["model"] for f in used["fallback_models"]]]
+        assert review.judge_model == f"groq/{expected_judge}"
+
+
+def test_same_model_on_another_provider_is_still_excluded_and_lone_model_cannot_self_judge():
+    cfg = _pool_cfg(("groq", "m"), ("hf", "m"), ("ollama", "other"))
+    chat = FakeJudgeChat([REVIEW_REPLY])
+    DecisionGate(cfg, judge=LlmJudge(cfg, chat=chat)).review(make_state(), "z", "c", generator_model="m")
+    assert chat.calls[0]["cfg"]["router"]["active_model"] == "other"
+    lone = _pool_cfg(("groq", "only"))
+    with pytest.raises(GateUnavailable, match="no verified model other than only"):
+        DecisionGate(lone, judge=LlmJudge(lone, chat=FakeJudgeChat([REVIEW_REPLY]))).review(
+            make_state(), "z", "c", generator_model="only")
+
+
+def test_review_cache_is_per_generator():
+    cfg = _pool_cfg(("groq", "a"), ("groq", "b"))
+    chat = FakeJudgeChat([REVIEW_REPLY, REVIEW_REPLY])
+    gate = DecisionGate(cfg, judge=LlmJudge(cfg, chat=chat))
+    gate.review(make_state(), "z", "same text", generator_model="a")
+    assert gate.review(make_state(), "z", "same text", generator_model="a").cached
+    gate.review(make_state(), "z", "same text", generator_model="b")  # judged afresh by "a", not a cache hit
+    assert [c["cfg"]["router"]["active_model"] for c in chat.calls] == ["b", "a"]

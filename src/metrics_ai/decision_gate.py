@@ -51,6 +51,7 @@ class ReviewResult:
     gate_mode: str
     critique: str = ""
     cached: bool = False
+    judge_model: str = ""  # who answered Stage 3 (never the generator in llm_judge mode)
 
     def failures(self, thresholds: dict[str, float]) -> list[str]:
         scores = {"is_mechanically_faithful": self.faithful_prob, "is_metric_accurate": self.metric_prob,
@@ -187,35 +188,42 @@ class DecisionGate:
         raise GateUnavailable(" ".join(notes) or "No SystemOne key and no LLM judge configured. "
                               "Run `metrics auth`, or pass --offline-no-llm for the Tier-3 heuristic gate.")
 
-    def review(self, state: dict[str, Any], z_clause: str, candidate: str, role: str = "") -> ReviewResult:
-        """Stage 3: faithfulness, metric accuracy and fluency, cached per (state, candidate)."""
+    def review(self, state: dict[str, Any], z_clause: str, candidate: str, role: str = "",
+               generator_model: str = "") -> ReviewResult:
+        """Stage 3: faithfulness, metric accuracy and fluency, cached per (state, candidate, generator).
+
+        In `llm_judge` mode the verdict comes from a verified model other than `generator_model`.
+        """
         evidence = review_state(state, candidate, role)
-        key = cache_key(evidence, candidate)
+        key = cache_key(evidence, candidate + "\x00" + generator_model)
         if key in self._review_cache:
             hit = self._review_cache[key]
             return ReviewResult(hit.faithful_prob, hit.metric_prob, hit.natural_prob, hit.gate_mode,
-                                hit.critique, cached=True)
-        result = self._review_uncached(evidence, z_clause, candidate)
+                                hit.critique, cached=True, judge_model=hit.judge_model)
+        result = self._review_uncached(evidence, z_clause, candidate, generator_model)
         if result.failures(self.thresholds) and not result.critique:
             result.critique = diagnostic_critique(result, self.thresholds)
         self._review_cache[key] = result
         return result
 
-    def _review_uncached(self, evidence: dict[str, Any], z_clause: str, candidate: str) -> ReviewResult:
+    def _review_uncached(self, evidence: dict[str, Any], z_clause: str, candidate: str,
+                         generator_model: str = "") -> ReviewResult:
         if self.offline:
             return self._offline_review(evidence, z_clause, candidate)
         errors = []
         if self.api_key:
             try:
                 data = self._post(evidence, REVIEW_QUESTIONS)
-                return ReviewResult(*(_prob(_answer(data, q)) for q in REVIEW_QUESTIONS), GATE_JEV)
+                return ReviewResult(*(_prob(_answer(data, q)) for q in REVIEW_QUESTIONS), GATE_JEV,
+                                    judge_model=self.model)
             except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
                 errors.append(f"SystemOne: {type(exc).__name__}")
         if self.judge:
             try:
-                verdict = self.judge.review(evidence, REVIEW_QUESTIONS)
+                verdict = self.judge.review(evidence, REVIEW_QUESTIONS, generator_model=generator_model)
                 return ReviewResult(round(verdict.is_mechanically_faithful, 3), round(verdict.is_metric_accurate, 3),
-                                    round(verdict.is_prose_natural, 3), GATE_JUDGE, verdict.critique)
+                                    round(verdict.is_prose_natural, 3), GATE_JUDGE, verdict.critique,
+                                    judge_model=self.judge.last_model)
             except JudgeError as exc:
                 errors.append(f"judge: {str(exc)[:80]}")
         raise GateUnavailable("Stage-3 review unavailable (" + "; ".join(errors or ["no tier configured"]) + ")")
