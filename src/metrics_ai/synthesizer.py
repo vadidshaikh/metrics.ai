@@ -159,7 +159,9 @@ def synthesize(cfg: dict[str, Any], gate: DecisionGate, state: dict[str, Any], a
         guard_retries = review_retries = 0
         while True:
             attempts += 1
-            provider, model, text, index = chat(cfg, messages, start_index=index)
+            # Every retry starts again from this round's preferred model: a transient 429 may make one call fall
+            # through to a weaker fallback, but must not demote all later retries to it.
+            provider, model, text, _used = chat(cfg, messages, start_index=index)
             messages.append({"role": "assistant", "content": text})
             try:
                 obj = schema.model_validate(parse_json(text), context=context)

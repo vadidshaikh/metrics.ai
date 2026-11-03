@@ -425,3 +425,17 @@ def test_tpm_z_must_cover_every_mechanism():
         obj = _validate(_xyz(z=z))
         assert (not lens_violations("tpm", obj.x_accomplishment, obj.z_mechanism, obj.combined_xyz_bullet,
                                     STATE)) is ok
+
+
+def test_a_transient_fallback_does_not_demote_later_retries():
+    # Regression: one 429 made a call fall through to the weakest model, and every retry then started there.
+    starts = []
+
+    def chat(cfg, messages, start_index=0, **kwargs):
+        starts.append(start_index)
+        if len(starts) == 1:  # first call: preferred model rate-limited, answered by fallback #2
+            return "ollama", "tiny", json.dumps(_xyz(x=X.replace("82.5%", "83%"))), 2
+        return "hf", "model-0", json.dumps(_xyz()), 0
+
+    result = _run(chat, n_models=3)
+    assert starts == [0, 0] and result.model == "model-0"
