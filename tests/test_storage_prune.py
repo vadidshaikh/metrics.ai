@@ -68,4 +68,4 @@ def test_gate_mode_column_migrates_legacy_ledger(tmp_path):
     ledger.init_schema()
     with ledger.connect() as c:
         cols = {r["name"] for r in c.execute("PRAGMA table_info(synthesized_impacts)")}
-    assert "gate_mode" in cols
+    assert {"gate_mode", "natural_prob"} <= cols

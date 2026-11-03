@@ -48,6 +48,16 @@ def _isolate_env(monkeypatch):
     monkeypatch.setitem(DEFAULT_CONFIG["providers"], "ollama_url", "http://127.0.0.1:9")
 
 
+@pytest.fixture(autouse=True)
+def sleeps(monkeypatch):
+    """Record (never perform) rate-limit backoff sleeps so tests are fast and deterministic."""
+    from metrics_ai import llm_client
+
+    calls: list[float] = []
+    monkeypatch.setattr(llm_client.time, "sleep", calls.append)
+    return calls
+
+
 @pytest.fixture
 def repo(tmp_path: Path) -> git.Repo:
     """A two-commit repo: sequential baseline -> batched/cached target."""
@@ -67,17 +77,20 @@ def repo(tmp_path: Path) -> git.Repo:
 
 def make_state(latency=(1000.0, 250.0), memory=(50.0, 40.0), signals=("batched_operations_added",),
                extra_diff=None):
-    from metrics_ai.collector import compute_deltas
+    from metrics_ai.collector import compute_deltas, metric_manifest
 
-    runs_b = [{"mean_latency_ms": latency[0], "peak_memory_mb": memory[0], "exit_code": 0}]
-    runs_t = [{"mean_latency_ms": latency[1], "peak_memory_mb": memory[1], "exit_code": 0}]
+    raw = {"per_run_ms": [1.0, 1.0, 1.0], "per_run_mb": [1.0, 1.0, 1.0], "benchmark_iterations": 3}
+    runs_b = [{"mean_latency_ms": latency[0], "peak_memory_mb": memory[0], "exit_code": 0, "raw_benchmark_json": raw}]
+    runs_t = [{"mean_latency_ms": latency[1], "peak_memory_mb": memory[1], "exit_code": 0, "raw_benchmark_json": raw}]
     diff = {"signals": list(signals), "batching_calls_added": ["executemany"],
             "mechanisms": ["batched database writes into one transaction via executemany()"]} if signals else {}
     diff.update(extra_diff or {})
-    return {
+    state = {
         "baseline_sha": "a" * 40, "target_sha": "b" * 40, "command": "python bench.py",
         "files_modified": ["src/storage.py"], "ast_structural_diff": diff,
         "complexity_delta": {"cyclomatic_before": 3.0, "cyclomatic_after": 2.0, "loc_delta": -4,
                              "complexity_delta_pct": -33.3},
         "telemetry_delta": compute_deltas(runs_b, runs_t, 3.0, 2.0),
     }
+    state["measured_metrics"], state["unmeasured_metrics"] = metric_manifest(state)
+    return state

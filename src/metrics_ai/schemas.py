@@ -7,8 +7,9 @@ from typing import Any
 
 from pydantic import BaseModel, Field, ValidationInfo, model_validator
 
-from metrics_ai.prose import (assemble_xyz, lint_xyz, negated_reductions, normalize_x, normalize_y, normalize_z,
-                              plain_identifiers, prose_defects, unmeasured_claims)
+from metrics_ai.prose import (assemble_xyz, lint_xyz, multiplier_misuse, negated_reductions, normalize_x,
+                              normalize_y, normalize_z, plain_identifiers, prose_defects, single_sample_claims,
+                              unmeasured_claims)
 
 # Integers/decimals not glued to a preceding identifier (so `SQLite3` is ignored). Trailing units
 # (`160ms`, `5.7x`) are allowed, and a match may never stop part-way through a decimal (`3435.1ms`).
@@ -121,6 +122,13 @@ class StarResponse(BaseModel):
         claimed = unmeasured_claims(text, list(ctx.get("unmeasured", [])))
         if claimed:
             problems.append(f"mentions {claimed} but that metric was not measured")
+        misused = multiplier_misuse(text)
+        if misused:
+            problems.append(f"multiplier misuse {misused}: a multiplier is a speedup, a percentage is a reduction")
+        sampled = single_sample_claims(text)
+        if sampled:
+            problems.append(f"{sampled}: each mean aggregates benchmark_iterations timed runs; cite that count "
+                            "or omit it, never call it a single sample")
         if problems:
             raise ValueError("prose linter rejected the STAR answer: " + "; ".join(problems))
         return self

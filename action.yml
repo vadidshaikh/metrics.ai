@@ -65,8 +65,9 @@ runs:
         METRICS_CMD: ${{ inputs.command }}
       run: |
         set -euo pipefail
+        # The PR table is deterministic; CI has no LLM/SystemOne keys, so use the Tier-3 gate explicitly.
         metrics generate --format pr-md --commit "$HEAD_SHA" --baseline "$BASE_SHA" \
-          --command "$METRICS_CMD" > metrics-generate.log
+          --command "$METRICS_CMD" --offline-no-llm > metrics-generate.log
         # The raw Markdown block starts at the table heading printed by the deterministic renderer.
         sed -n '/^### metrics.ai telemetry delta/,$p' metrics-generate.log > metrics-delta.md
         cat metrics-delta.md >> "$GITHUB_STEP_SUMMARY"

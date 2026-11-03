@@ -24,23 +24,30 @@ GITIGNORE_ENTRY = ".metrics/"
 SECRET_ENV = {
     "groq_api_key": ("GROQ_API_KEY",),
     "hf_token": ("HF_TOKEN",),
-    "jev_api_key": ("TYPESAFE_API_KEY", "JEV_API_KEY"),
+    "jev_api_key": ("JEV_API_KEY",),            # OpenJev (codiv.ai) or any SystemOne-compatible server
+    "typesafe_api_key": ("TYPESAFE_API_KEY",),  # commercial TypeSafe Jev
 }
+
+OPENJEV_ENDPOINT, OPENJEV_MODEL = "https://api.codiv.ai/v1/systemone", "openjev-latest"
+TYPESAFE_ENDPOINT, TYPESAFE_MODEL = "https://api.typesafe.ai/v1/systemone", "jev-1.13.0"
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "jev": {
-        "endpoint": "https://api.typesafe.ai/v1/systemone",
-        "model": "jev-1.13.0",
+        "endpoint": OPENJEV_ENDPOINT,
+        "model": OPENJEV_MODEL,
+        "typesafe_endpoint": TYPESAFE_ENDPOINT,
+        "typesafe_model": TYPESAFE_MODEL,
         "timeout_s": 30.0,
         "worthy_threshold": 0.60,
         "faithful_threshold": 0.80,
+        "metric_threshold": 0.80,
         "natural_threshold": 0.80,
     },
     "providers": {
         "prefer": "",
         "ollama_url": "http://localhost:11434",
     },
-    "secrets": {"groq_api_key": "", "hf_token": "", "jev_api_key": ""},
+    "secrets": {"groq_api_key": "", "hf_token": "", "jev_api_key": "", "typesafe_api_key": ""},
     "router": {
         "active_provider": "",
         "active_model": "",
@@ -52,10 +59,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
 
 # Old defaults persisted by earlier versions; upgraded transparently on load.
 LEGACY_DEFAULTS = {
-    ("jev", "endpoint"): ("https://jevmodel.net/v1/systemone", "https://api.typesafe.ai/v1/systemone"),
-    ("jev", "model"): ("typesafe/jev-1.13.0", "jev-1.13.0"),
-    ("jev", "faithful_threshold"): (0.75, 0.80),
-    ("jev", "timeout_s"): (8.0, 30.0),
+    # The generic slot now defaults to OpenJev; TypeSafe has its own typesafe_* settings.
+    ("jev", "endpoint"): (("https://jevmodel.net/v1/systemone", TYPESAFE_ENDPOINT), OPENJEV_ENDPOINT),
+    ("jev", "model"): (("typesafe/jev-1.13.0", TYPESAFE_MODEL), OPENJEV_MODEL),
+    ("jev", "faithful_threshold"): ((0.75,), 0.80),
+    ("jev", "timeout_s"): ((8.0,), 30.0),
 }
 
 
@@ -96,8 +104,8 @@ def load_config(root: Path) -> dict[str, Any]:
         return copy.deepcopy(DEFAULT_CONFIG)
     with path.open("rb") as fh:
         cfg = _merge(DEFAULT_CONFIG, tomllib.load(fh))
-    for (section, key), (old, new) in LEGACY_DEFAULTS.items():
-        if cfg.get(section, {}).get(key) == old:
+    for (section, key), (olds, new) in LEGACY_DEFAULTS.items():
+        if cfg.get(section, {}).get(key) in olds:
             cfg[section][key] = new
     return cfg
 
@@ -138,6 +146,22 @@ def get_secret(cfg: dict[str, Any], name: str) -> str:
     if env_value:
         return env_value
     return str(cfg.get("secrets", {}).get(name, "") or "").strip()
+
+
+def jev_target(cfg: dict[str, Any]) -> tuple[str, str, str, str]:
+    """(endpoint, model, api_key, label) for the Tier-1 SystemOne gate.
+
+    A TypeSafe key routes to TypeSafe Jev; otherwise the configured (default OpenJev) endpoint is used.
+    An empty api_key means Tier 1 is unavailable.
+    """
+    jev = cfg.get("jev", {})
+    typesafe_key = get_secret(cfg, "typesafe_api_key")
+    if typesafe_key:
+        return (jev.get("typesafe_endpoint", TYPESAFE_ENDPOINT), jev.get("typesafe_model", TYPESAFE_MODEL),
+                typesafe_key, "typesafe")
+    endpoint = jev.get("endpoint", OPENJEV_ENDPOINT)
+    label = "openjev" if "codiv.ai" in endpoint else "systemone"
+    return endpoint, jev.get("model", OPENJEV_MODEL), get_secret(cfg, "jev_api_key"), label
 
 
 def shadowed_secrets(cfg: dict[str, Any]) -> list[str]:

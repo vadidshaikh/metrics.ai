@@ -63,14 +63,16 @@ def init(hook: bool = typer.Option(False, "--hook", help="Install a fast .git/ho
 @app.command()
 def auth(groq_key: Optional[str] = typer.Option(None, "--groq-key"),
          hf_token: Optional[str] = typer.Option(None, "--hf-token"),
-         jev_key: Optional[str] = typer.Option(None, "--jev-key"),
+         jev_key: Optional[str] = typer.Option(None, "--jev-key", help="OpenJev / SystemOne-compatible key."),
+         typesafe_key: Optional[str] = typer.Option(None, "--typesafe-key", help="Commercial TypeSafe Jev key."),
          prefer: Optional[str] = typer.Option(None, "--prefer", help="groq | hf | ollama"),
          jev_endpoint: Optional[str] = typer.Option(None, "--jev-endpoint",
                                                     help="SystemOne URL, e.g. https://api.codiv.ai/v1/systemone"),
          jev_model: Optional[str] = typer.Option(None, "--jev-model", help="e.g. jev-1.13.0 or openjev-latest")) -> None:
     """Store credentials, then discover, score, probe and lock the best model."""
     root, cfg, _ = _ctx()
-    cfg = config.store_secrets(root, cfg, groq_api_key=groq_key, hf_token=hf_token, jev_api_key=jev_key)
+    cfg = config.store_secrets(root, cfg, groq_api_key=groq_key, hf_token=hf_token, jev_api_key=jev_key,
+                               typesafe_api_key=typesafe_key)
     if prefer:
         if prefer not in {"groq", "hf", "ollama"}:
             raise typer.BadParameter("--prefer must be groq, hf or ollama")
@@ -95,9 +97,11 @@ def auth(groq_key: Optional[str] = typer.Option(None, "--groq-key"),
     else:
         console.print("[red]No model passed the live probe.[/]")
         raise typer.Exit(1)
-    jev = ("configured (Tier-1 jev_api gate)" if config.get_secret(cfg, "jev_api_key")
-           else "not set (Tier-2 llm_judge gate will use the locked model)")
-    console.print(f"Jev / TypeSafe API key: {jev} · endpoint {cfg['jev']['endpoint']} · model {cfg['jev']['model']}")
+    endpoint, model, key, label = config.jev_target(cfg)
+    if key:
+        console.print(f"System-1 gate: Tier-1 jev_api via {label} · {endpoint} · model {model}")
+    else:
+        console.print("System-1 gate: no SystemOne key; Tier-2 llm_judge will use the locked model")
 
 
 def _record_head(ledger: Ledger, root: Path) -> str:
@@ -172,7 +176,8 @@ def generate(commit: str = typer.Option("HEAD", "--commit", help="Target revisio
                                role=role, density=density, command=command, force=force,
                                offline=offline_no_llm, jev_response=_load_json(jev_response))
     if failed:
-        console.print(f"[red]No verified artifact for: {', '.join(failed)}[/]")
+        if failed != ["gate"]:  # the pipeline already explained an unavailable gate
+            console.print(f"[red]No verified artifact for: {', '.join(failed)}[/]")
         raise typer.Exit(1)
 
 
@@ -191,6 +196,7 @@ def jev_request(commit: str = typer.Option("HEAD", "--commit"),
                 command: Optional[str] = typer.Option(None, "--command"),
                 stage: str = typer.Option("triage", "--stage", help="triage | review"),
                 candidate: str = typer.Option("", "--candidate", help="Bullet text for --stage review."),
+                role: str = typer.Option("", "--role", help="Target role for --stage review."),
                 out: Optional[Path] = typer.Option(None, "--out", help="Also write the body to this file.")) -> None:
     """Print the exact SystemOne request body to run in the Jev playground (no API key needed)."""
     if stage not in {"triage", "review"}:
@@ -200,7 +206,8 @@ def jev_request(commit: str = typer.Option("HEAD", "--commit"),
     root, cfg, ledger = _ctx()
     quiet = Console(stderr=True, highlight=False)
     _, _, state = pipeline.load_state(root, ledger, quiet, commit, baseline, command)
-    body = DecisionGate(cfg).request_body(stage, state, candidate)
+    endpoint, model, _key, _label = config.jev_target(cfg)
+    body = DecisionGate(cfg, endpoint=endpoint, model=model).request_body(stage, state, candidate, role)
     text = json.dumps(body, indent=2, ensure_ascii=False)
     if out:
         out.write_text(text + "\n", encoding="utf-8")

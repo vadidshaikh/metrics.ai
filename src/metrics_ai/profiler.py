@@ -40,11 +40,22 @@ def _tree_rss(proc: psutil.Process) -> int:
     return total
 
 
+def child_env(cwd: Path | None) -> dict[str, str] | None:
+    """Put the profiled repo's own `src/` first on PYTHONPATH (src layout), so a checked-out commit is
+    measured with its own code even when metrics.ai itself is installed elsewhere."""
+    src = (cwd or Path.cwd()) / "src"
+    if not src.is_dir():
+        return None
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(p for p in (str(src), env.get("PYTHONPATH", "")) if p)
+    return env
+
+
 def profile_once(cmd: str | list[str], cwd: Path | None = None, shell: bool = False) -> dict[str, Any]:
     """Run `cmd` once, sampling the whole process tree's RSS every 10 ms."""
     args: Any = cmd if shell else _argv(cmd)
     start = time.perf_counter()
-    proc = psutil.Popen(args, cwd=cwd, shell=shell)
+    proc = psutil.Popen(args, cwd=cwd, shell=shell, env=child_env(cwd))
     peak = 0
     samples = 0
     while True:
@@ -74,6 +85,9 @@ def profile_command(cmd: str, runs: int = 3, cwd: Path | None = None, shell: boo
         "raw_benchmark_json": {
             "mode": "wrap",
             "poll_interval_ms": POLL_INTERVAL_S * 1000,
+            "per_run_ms": latencies,
+            "per_run_mb": [r["peak_rss_mb"] for r in results],
+            "benchmark_iterations": len(latencies),
             "stdev_latency_ms": statistics.stdev(latencies) if len(latencies) > 1 else 0.0,
             "runs": results,
         },
@@ -85,12 +99,16 @@ def parse_benchmark_json(data: dict[str, Any]) -> list[dict[str, Any]]:
     records = []
     for bench in data.get("benchmarks", []):
         stats = bench.get("stats", {})
+        per_run_ms = [float(v) * 1000.0 for v in stats.get("data") or []]  # present with --benchmark-save-data
         records.append({
             "command": f"pytest::{bench.get('fullname') or bench.get('name')}",
             "mean_latency_ms": float(stats.get("mean", 0.0)) * 1000.0,
             "throughput_items_sec": float(stats["ops"]) if stats.get("ops") is not None else None,
             "raw_benchmark_json": {
                 "mode": "pytest-benchmark",
+                "per_run_ms": per_run_ms,
+                "per_run_mb": [],  # pytest-benchmark reports one process-wide peak, set below
+                "benchmark_iterations": len(per_run_ms) or int(stats.get("rounds") or 0),
                 "stddev_ms": float(stats.get("stddev", 0.0)) * 1000.0,
                 "rounds": stats.get("rounds"),
                 "min_ms": float(stats.get("min", 0.0)) * 1000.0,

@@ -1,9 +1,10 @@
-"""Live model enumeration, capability scoring, micro-probing and failover across providers."""
+"""Cross-provider model enumeration, capability scoring, micro-probing and fallback locking.
+
+Chat/HTTP failover lives in `llm_client`; its public names are re-exported here for callers.
+"""
 
 from __future__ import annotations
 
-import fnmatch
-import json
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -13,27 +14,29 @@ from typing import Any
 import httpx
 
 from metrics_ai.config import get_secret
+from metrics_ai.llm_client import (GROQ_BASE, HF_BASE, ProviderUnavailable, base_url, chat,  # noqa: F401
+                                   headers, model_chain, parse_json)
 
-GROQ_BASE = "https://api.groq.com/openai/v1"
-HF_BASE = "https://router.huggingface.co/v1"
 EXCLUDE = ("whisper", "tts", "guard", "embed", "vision", "audio", "moderation", "rerank",
-           "orpheus")  # orpheus: Groq's text-to-speech family, not caught by "tts"
-# Ordered preference tiers: (glob over the lower-cased model basename, score).
+           "orpheus",  # Groq's text-to-speech family, not caught by "tts"
+           "allam")    # fails strict Pydantic JSON schemas; never used for code/JSON synthesis
+# Ordered preference tiers: (regex searched in the lower-cased model basename, score).
 TIERS = [
-    ("qwen3-coder*", 100), ("qwen2.5-coder*", 97), ("gpt-oss-120b", 95),
-    ("qwen3-235b*", 94), ("qwen3-32b*", 93), ("deepseek-v4*", 92), ("deepseek-v3*", 91),
-    ("llama-3.3-70b*", 90), ("llama-4-*", 89), ("deepseek-r1*", 88),
-    ("kimi-k2*", 87), ("glm-5*", 85), ("glm-4*", 83), ("gpt-oss-20b", 81), ("gemma-4*", 79),
-    ("llama-3.1-8b*", 75),
+    (r"qwen3.*coder", 100), (r"qwen2\.5.*coder", 97), (r"gpt-oss-120b", 95),
+    (r"qwen3(\.\d+)?-\d+b", 93), (r"deepseek-v4", 92), (r"deepseek-v3", 91), (r"llama-3\.3-70b", 90),
+    (r"llama-4-", 89), (r"deepseek-r1", 88),
+    (r"kimi-k2", 87), (r"glm-5", 85), (r"glm-4", 83), (r"gpt-oss-20b", 81), (r"gemma-4", 80),
+    (r"llama-3\.1-70b", 78),
 ]
 DEFAULT_SCORE = 40
 HF_STRUCTURED_BONUS = 5
+PRIMARY_PROBES = 3      # top models probed on the preferred provider
+SECONDARY_PROBES = 2    # top models probed on every other configured provider
 PROBE_TOP_N = 4
 PROBE_TIMEOUT_S = 4.0
 MAX_PROBE_BATCHES = 3
 # Provider-level rejections (bad key, no credits, forbidden): no model on that provider will pass.
 AUTH_FAILURES = {"HTTP 401", "HTTP 402", "HTTP 403"}
-RETRYABLE = {429, 500, 502, 503, 504}
 
 
 @dataclass
@@ -47,23 +50,6 @@ class Candidate:
     note: str = ""
 
 
-class ProviderUnavailable(RuntimeError):
-    """Raised when every configured model failed with a retryable error."""
-
-
-def base_url(provider: str, cfg: dict[str, Any]) -> str:
-    if provider == "groq":
-        return GROQ_BASE
-    if provider == "hf":
-        return HF_BASE
-    return cfg["providers"]["ollama_url"].rstrip("/") + "/v1"
-
-
-def _headers(provider: str, cfg: dict[str, Any]) -> dict[str, str]:
-    key = {"groq": "groq_api_key", "hf": "hf_token"}.get(provider)
-    return {"Authorization": f"Bearer {get_secret(cfg, key)}"} if key else {}
-
-
 def score_model(model_id: str, hf_meta: dict[str, Any] | None = None) -> int | None:
     """Capability score, or None when the model is excluded (non-text modality / not live)."""
     name = model_id.split("/")[-1].lower()
@@ -72,7 +58,7 @@ def score_model(model_id: str, hf_meta: dict[str, Any] | None = None) -> int | N
     providers = (hf_meta or {}).get("providers") or []
     if providers and not any(p.get("status") == "live" for p in providers):
         return None
-    score = next((s for pattern, s in TIERS if fnmatch.fnmatch(name, pattern)), DEFAULT_SCORE)
+    score = next((s for pattern, s in TIERS if re.search(pattern, name)), DEFAULT_SCORE)
     if any(p.get("status") == "live" and p.get("supports_structured_output") for p in providers):
         score += HF_STRUCTURED_BONUS
     return score
@@ -94,8 +80,7 @@ def enumerate_models(cfg: dict[str, Any], client: httpx.Client) -> tuple[list[Ca
     sources.append(("ollama", cfg["providers"]["ollama_url"].rstrip("/") + "/api/tags"))
     for provider, url in sources:
         try:
-            resp = client.get(url, headers=_headers(provider, cfg),
-                              timeout=2.0 if provider == "ollama" else 10.0)
+            resp = client.get(url, headers=headers(provider, cfg), timeout=2.0 if provider == "ollama" else 10.0)
             resp.raise_for_status()
             payload = resp.json()
         except (httpx.HTTPError, ValueError) as exc:
@@ -122,7 +107,7 @@ def probe(cfg: dict[str, Any], cand: Candidate, client: httpx.Client) -> Candida
     start = time.perf_counter()
     try:
         resp = client.post(f"{base_url(cand.provider, cfg)}/chat/completions", json=body,
-                           headers=_headers(cand.provider, cfg), timeout=PROBE_TIMEOUT_S)
+                           headers=headers(cand.provider, cfg), timeout=PROBE_TIMEOUT_S)
         cand.probe_ms = round((time.perf_counter() - start) * 1000.0, 1)
         cand.probe_ok = resp.status_code == 200 and bool(resp.json().get("choices"))
         cand.note = "" if cand.probe_ok else f"HTTP {resp.status_code}"
@@ -131,98 +116,51 @@ def probe(cfg: dict[str, Any], cand: Candidate, client: httpx.Client) -> Candida
     return cand
 
 
+def probe_plan(ranked: list[Candidate], primary: str) -> list[Candidate]:
+    """Top 3 on the primary provider plus the top 2 on every secondary provider, in rank order."""
+    plan, per_provider = [], {}
+    for cand in ranked:
+        limit = PRIMARY_PROBES if cand.provider == primary else SECONDARY_PROBES
+        if per_provider.get(cand.provider, 0) < limit:
+            plan.append(cand)
+            per_provider[cand.provider] = per_provider.get(cand.provider, 0) + 1
+    return plan
+
+
+def _probe_all(cfg: dict[str, Any], batch: list[Candidate], client: httpx.Client) -> None:
+    with ThreadPoolExecutor(max_workers=max(1, min(8, len(batch)))) as pool:
+        list(pool.map(lambda c: probe(cfg, c, client), batch))
+
+
 def discover(cfg: dict[str, Any], transport: httpx.BaseTransport | None = None) -> dict[str, Any]:
-    """Enumerate -> filter -> score -> probe top 4 -> lock winner + fallbacks into `cfg`."""
+    """Enumerate -> filter -> score -> cross-provider probe -> lock winner + fallbacks into `cfg`."""
+    prefer = cfg["providers"].get("prefer", "")
     with httpx.Client(transport=transport) as client:
         candidates, notes = enumerate_models(cfg, client)
-        ranked = rank(candidates, cfg["providers"].get("prefer", ""))
-        top: list[Candidate] = []
-        dead: set[str] = set()
-        # Probe the top 4; if none pass, move to the next 4 (skipping providers that rejected
-        # our credentials) so a broken key on one provider cannot block a healthy one.
+        ranked = rank(candidates, prefer)
+        primary = prefer if any(c.provider == prefer for c in ranked) else (ranked[0].provider if ranked else "")
+        probed = probe_plan(ranked, primary)
+        _probe_all(cfg, probed, client)
+        dead = {p for p in {c.provider for c in probed}
+                if all(c.note in AUTH_FAILURES for c in probed if c.provider == p)}
+        for provider in sorted(dead):
+            notes.append(f"{provider}: credentials/billing rejected (HTTP 401/402/403); skipping provider")
+        # Nothing passed: keep probing further batches of the healthy providers.
         for _batch in range(MAX_PROBE_BATCHES):
-            batch = [c for c in ranked if c not in top and c.provider not in dead][:PROBE_TOP_N]
+            if any(c.probe_ok for c in probed):
+                break
+            batch = [c for c in ranked if c not in probed and c.provider not in dead][:PROBE_TOP_N]
             if not batch:
                 break
-            with ThreadPoolExecutor(max_workers=PROBE_TOP_N) as pool:
-                list(pool.map(lambda c: probe(cfg, c, client), batch))
-            top += batch
-            if any(c.probe_ok for c in batch):
-                break
-            for provider in {c.provider for c in batch}:
-                if all(c.note in AUTH_FAILURES for c in batch if c.provider == provider):
-                    dead.add(provider)
-                    notes.append(f"{provider}: credentials/billing rejected (HTTP 401/402/403); skipping provider")
-    passing = [c for c in top if c.probe_ok]
+            _probe_all(cfg, batch, client)
+            probed += batch
+    passing = [c for c in ranked if c in probed and c.probe_ok]
+    ordered = [c for c in passing if c.provider == primary] + [c for c in passing if c.provider != primary]
     router = cfg.setdefault("router", {})
-    if passing:
-        router["active_provider"], router["active_model"] = passing[0].provider, passing[0].model
-        router["fallback_models"] = [{"provider": c.provider, "model": c.model} for c in passing[1:]]
+    if ordered:
+        router["active_provider"], router["active_model"] = ordered[0].provider, ordered[0].model
+        router["fallback_models"] = [{"provider": c.provider, "model": c.model} for c in ordered[1:]]
         router["discovered_at"] = int(time.time())
-    return {"candidates": [asdict(c) for c in ranked], "probed": [asdict(c) for c in top],
-            "winner": asdict(passing[0]) if passing else None, "notes": notes,
-            "total_discovered": len(candidates)}
-
-
-MAX_RETRY_AFTER_S = 20.0
-
-
-def _retry_after(resp: httpx.Response) -> float | None:
-    """Seconds to wait from a 429's Retry-After header, if present and short enough."""
-    try:
-        wait = float(resp.headers.get("retry-after", ""))
-    except ValueError:
-        return None
-    return wait if 0 <= wait <= MAX_RETRY_AFTER_S else None
-
-
-def model_chain(cfg: dict[str, Any]) -> list[tuple[str, str]]:
-    router = cfg.get("router", {})
-    chain = [(router["active_provider"], router["active_model"])] if router.get("active_model") else []
-    chain += [(f["provider"], f["model"]) for f in router.get("fallback_models", [])]
-    return chain
-
-
-def chat(cfg: dict[str, Any], messages: list[dict[str, str]], start_index: int = 0,
-         transport: httpx.BaseTransport | None = None, max_tokens: int = 4000,
-         temperature: float = 0.2) -> tuple[str, str, str, int]:
-    """Run a chat completion, failing over on 429/5xx. Returns (provider, model, text, chain index)."""
-    chain = model_chain(cfg)
-    if not chain:
-        raise ProviderUnavailable("No active model locked. Run `metrics auth` first.")
-    errors = []
-    with httpx.Client(transport=transport, timeout=120.0) as client:
-        for index in range(start_index, len(chain)):
-            provider, model = chain[index]
-            body = {"model": model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens}
-            try:
-                resp = client.post(f"{base_url(provider, cfg)}/chat/completions", json=body,
-                                   headers=_headers(provider, cfg))
-            except httpx.TransportError as exc:
-                errors.append(f"{provider}/{model}: {type(exc).__name__}")
-                continue
-            if resp.status_code == 429 and (wait := _retry_after(resp)) is not None:
-                time.sleep(wait)  # honour short rate-limit windows once before failing over
-                try:
-                    resp = client.post(f"{base_url(provider, cfg)}/chat/completions", json=body,
-                                       headers=_headers(provider, cfg))
-                except httpx.TransportError as exc:
-                    errors.append(f"{provider}/{model}: {type(exc).__name__}")
-                    continue
-            if resp.status_code in RETRYABLE:
-                errors.append(f"{provider}/{model}: HTTP {resp.status_code}")
-                continue
-            resp.raise_for_status()
-            content = resp.json()["choices"][0]["message"].get("content") or ""
-            return provider, model, content, index
-    raise ProviderUnavailable("All models failed: " + "; ".join(errors))
-
-
-def parse_json(text: str) -> dict[str, Any]:
-    """Extract the JSON object from a model reply (tolerates <think> blocks and code fences)."""
-    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
-    text = re.sub(r"```(?:json)?", "", text).strip()
-    start, end = text.find("{"), text.rfind("}")
-    if start < 0 or end <= start:
-        raise json.JSONDecodeError("no JSON object found", text, 0)
-    return json.loads(text[start:end + 1])
+    return {"candidates": [asdict(c) for c in ranked], "probed": [asdict(c) for c in probed],
+            "winner": asdict(ordered[0]) if ordered else None, "notes": notes,
+            "total_discovered": len(candidates), "primary_provider": primary}

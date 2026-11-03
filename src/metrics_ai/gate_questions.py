@@ -50,25 +50,43 @@ TRIAGE_QUESTIONS = {
 REVIEW_QUESTIONS = {
     "is_mechanically_faithful": {
         "type": "noul",
-        "instructions": "Is every technical mechanism, library, and architectural action claimed in "
-                        "`candidate_bullet` directly supported by `ast_structural_diff` without inventing "
-                        "unmentioned tools?",
+        "instructions": "Are all libraries, functions, and code changes in `candidate_bullet` supported by "
+                        "`ast_structural_diff` and `files_modified` without invented context?",
         "criteria": {
-            "true": "All technical claims accurately reflect the AST mechanisms and modified files.",
-            "false": "The bullet invents technologies, databases, or changes absent from the state.",
+            "true": "Every technical claim matches the AST mechanisms and modified files; nothing is invented.",
+            "false": "The bullet invents technologies, services, databases, or changes absent from the state.",
+        },
+    },
+    "is_metric_accurate": {
+        "type": "noul",
+        "instructions": "Do all metric types (e.g. latency vs throughput vs memory) and numbers in "
+                        "`candidate_bullet` strictly match `telemetry_delta` and `measured_metrics`?",
+        "criteria": {
+            "true": "Every metric named is in `measured_metrics` and every number matches `telemetry_delta`.",
+            "false": "The bullet names a metric from `unmeasured_metrics`, mislabels a metric (e.g. a latency "
+                     "speedup called throughput), or misstates a number.",
         },
     },
     "is_prose_natural": {
         "type": "noul",
-        "instructions": "Does `candidate_bullet` read as fluent, natural executive English free of duplicated "
-                        "prepositions (such as 'by doing implementing'), fused noun-verb collisions, or run-on "
-                        "clauses?",
+        "instructions": "Is `candidate_bullet` fluent, concise executive English free of awkward phrasing, "
+                        "duplicate prepositions, or repetitive clauses?",
         "criteria": {
             "true": "Grammatically clean, parallel, and concise technical prose.",
-            "false": "Contains awkward phrasing such as 'by doing implementing', merged mechanisms lacking "
-                     "conjunctions, or grammatical errors.",
+            "false": "Contains awkward phrasing such as 'by doing implementing', duplicate prepositions, "
+                     "repetitive clauses, or grammatical errors.",
         },
     },
+}
+
+# Deterministic retry critique per failed Stage-3 question (SystemOne returns probabilities only).
+REVIEW_CRITIQUES = {
+    "is_mechanically_faithful": "FAITHFULNESS: name only mechanisms, functions and files present in "
+                                "ast_structural_diff / files_modified; remove any invented service, team or tool.",
+    "is_metric_accurate": "METRICS: use only metrics in measured_metrics with their exact numbers; a multiplier "
+                          "is a latency speedup, never throughput; never mention unmeasured_metrics.",
+    "is_prose_natural": "FLUENCY: write concise executive English; X and Y are noun phrases; Z is parallel "
+                        "gerund clauses joined with 'and'; no repeated numbers or clauses; no code punctuation.",
 }
 
 

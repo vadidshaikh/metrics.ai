@@ -35,8 +35,9 @@ def test_foreign_key_enforced(tmp_path):
 
 def test_config_defaults_save_and_merge(tmp_path):
     cfg = config.load_config(tmp_path)
-    assert cfg["jev"]["model"] == "jev-1.13.0"
-    assert cfg["jev"]["endpoint"] == "https://api.typesafe.ai/v1/systemone"
+    assert (cfg["jev"]["endpoint"], cfg["jev"]["model"]) == ("https://api.codiv.ai/v1/systemone", "openjev-latest")
+    assert (cfg["jev"]["typesafe_endpoint"], cfg["jev"]["typesafe_model"]) == \
+        ("https://api.typesafe.ai/v1/systemone", "jev-1.13.0")
     cfg["router"]["active_model"] = "m"
     config.save_config(tmp_path, cfg)
     assert config.load_config(tmp_path)["router"]["active_model"] == "m"
@@ -67,18 +68,23 @@ def test_find_root_walks_up(tmp_path):
     assert config.find_root(nested) == tmp_path.resolve()
 
 
-def test_legacy_jev_defaults_are_upgraded_on_load(tmp_path):
+@pytest.mark.parametrize("old_endpoint,old_model", [
+    ("https://jevmodel.net/v1/systemone", "typesafe/jev-1.13.0"),     # first release default
+    ("https://api.typesafe.ai/v1/systemone", "jev-1.13.0"),           # previous persisted default
+])
+def test_legacy_jev_defaults_are_upgraded_on_load(tmp_path, old_endpoint, old_model):
     cfg = config.load_config(tmp_path)
-    cfg["jev"].update(endpoint="https://jevmodel.net/v1/systemone", model="typesafe/jev-1.13.0",
-                      faithful_threshold=0.75)
+    cfg["jev"].update(endpoint=old_endpoint, model=old_model, faithful_threshold=0.75)
     config.save_config(tmp_path, cfg)
     loaded = config.load_config(tmp_path)["jev"]
-    assert (loaded["endpoint"], loaded["model"], loaded["faithful_threshold"]) ==         ("https://api.typesafe.ai/v1/systemone", "jev-1.13.0", 0.80)
+    assert (loaded["endpoint"], loaded["model"], loaded["faithful_threshold"]) == \
+        ("https://api.codiv.ai/v1/systemone", "openjev-latest", 0.80)
 
 
-def test_typesafe_key_env_takes_precedence(monkeypatch, tmp_path):
+def test_jev_target_routes_typesafe_key_to_typesafe_else_openjev(monkeypatch, tmp_path):
     cfg = config.load_config(tmp_path)
-    monkeypatch.setenv("JEV_API_KEY", "jev")
-    assert config.get_secret(cfg, "jev_api_key") == "jev"
+    assert config.jev_target(cfg) == ("https://api.codiv.ai/v1/systemone", "openjev-latest", "", "openjev")
+    monkeypatch.setenv("JEV_API_KEY", "oj")
+    assert config.jev_target(cfg)[2:] == ("oj", "openjev")
     monkeypatch.setenv("TYPESAFE_API_KEY", "ts")
-    assert config.get_secret(cfg, "jev_api_key") == "ts"
+    assert config.jev_target(cfg) == ("https://api.typesafe.ai/v1/systemone", "jev-1.13.0", "ts", "typesafe")

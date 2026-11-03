@@ -34,6 +34,7 @@ class TriageJudgment(BaseModel):
 
 class ReviewJudgment(BaseModel):
     is_mechanically_faithful: float = Field(ge=0.0, le=1.0)
+    is_metric_accurate: float = Field(ge=0.0, le=1.0)
     is_prose_natural: float = Field(ge=0.0, le=1.0)
     critique: str = ""
 
@@ -41,8 +42,8 @@ class ReviewJudgment(BaseModel):
 TRIAGE_SCHEMA = ('{"is_resume_worthy": float 0-1, "impact_tier": float 0-4, '
                  '"role_distribution": {"aiml": float, "backend": float, "mlops": float, "tpm": float}, '
                  '"critique": str}')
-REVIEW_SCHEMA = ('{"is_mechanically_faithful": float 0-1, "is_prose_natural": float 0-1, '
-                 '"critique": str (name the exact defect when either score is low)}')
+REVIEW_SCHEMA = ('{"is_mechanically_faithful": float 0-1, "is_metric_accurate": float 0-1, '
+                 '"is_prose_natural": float 0-1, "critique": str (name the exact defect when any score is low)}')
 
 
 class LlmJudge:

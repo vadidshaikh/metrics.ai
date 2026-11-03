@@ -145,9 +145,9 @@ def _cfg(n_models=1):
     return cfg
 
 
-def _run(chat, n_models=1, gate=None):
-    return synthesize(_cfg(n_models), gate or DecisionGate(DEFAULT_CONFIG), STATE, ALLOWED, "xyz",
-                      "backend", "standard", chat=chat)
+def _run(chat, n_models=1, gate=None, role="backend", others=None):
+    return synthesize(_cfg(n_models), gate or DecisionGate(DEFAULT_CONFIG, offline=True), STATE, ALLOWED, "xyz",
+                      role, "standard", chat=chat, others=others)
 
 
 def test_synthesize_retries_after_numeric_hallucination():
@@ -156,7 +156,7 @@ def test_synthesize_retries_after_numeric_hallucination():
     assert result.attempts == 2 and "['83']" in chat.calls[1][-1]["content"]
     lines = result.output_text.splitlines()
     assert lines[1].startswith("├─ [X]") and lines[3].startswith("└─ [Z]")
-    assert result.gate_mode == "offline_heuristic" and result.natural_prob >= 0.80
+    assert result.review.gate_mode == "offline_heuristic" and result.review.natural_prob >= 0.80
 
 
 def test_synthesize_feeds_linter_error_back_for_by_doing_implementing():
@@ -166,22 +166,39 @@ def test_synthesize_feeds_linter_error_back_for_by_doing_implementing():
     assert "by doing" not in result.output_text
 
 
-def test_synthesize_reprompts_with_review_critique():
-    class LowFluencyOnce:
+def test_synthesize_reprompts_with_diagnostic_review_critique():
+    from metrics_ai.decision_gate import ReviewResult, diagnostic_critique
+
+    class MetricWrongOnce:
+        thresholds = {"is_mechanically_faithful": 0.8, "is_metric_accurate": 0.8, "is_prose_natural": 0.8}
+
         def __init__(self):
-            self.calls = 0
+            self.calls = []
 
-        def review(self, state, z, candidate):
-            from metrics_ai.decision_gate import ReviewResult
-            self.calls += 1
-            if self.calls == 1:
-                return ReviewResult(0.95, 0.4, "llm_judge", "run-on clause")
-            return ReviewResult(0.95, 0.92, "llm_judge", "")
+        def review(self, state, z, candidate, role):
+            self.calls.append(role)
+            if len(self.calls) == 1:
+                bad = ReviewResult(0.95, 0.2, 0.9, "jev_api")
+                bad.critique = diagnostic_critique(bad, self.thresholds)
+                return bad
+            return ReviewResult(0.95, 0.93, 0.92, "jev_api")
 
+    gate = MetricWrongOnce()
     chat = FakeChat([json.dumps(_xyz()), json.dumps(_xyz())])
-    result = _run(chat, gate=LowFluencyOnce())
-    assert result.attempts == 2 and result.gate_mode == "llm_judge" and result.natural_prob == 0.92
-    assert "run-on clause" in chat.calls[1][-1]["content"]
+    result = _run(chat, gate=gate, role="mlops")
+    assert result.attempts == 2 and result.review.metric_prob == 0.93 and gate.calls == ["mlops", "mlops"]
+    feedback = chat.calls[1][-1]["content"]
+    assert "metric=0.20" in feedback and "METRICS:" in feedback and "FLUENCY" not in feedback
+
+
+def test_synthesize_rejects_a_clone_of_another_roles_bullet():
+    first = _validate(_xyz()).combined_xyz_bullet
+    distinct = _xyz(x="a 5.7x speedup in the ledger ingest benchmark",
+                    z="caching parsed source with lru_cache and batching inserts via executemany")
+    chat = FakeChat([json.dumps(_xyz()), json.dumps(distinct)])
+    result = _run(chat, role="mlops", others={"backend": first})
+    assert result.attempts == 2 and "similar to the backend bullet" in chat.calls[1][-1]["content"]
+    assert result.structured["combined_xyz_bullet"] != first
 
 
 def test_synthesize_fails_over_after_exhausting_retries():
@@ -232,3 +249,22 @@ def test_star_rejects_double_negative_and_unmeasured_metric():
     with pytest.raises(ValidationError, match="throughput"):
         StarResponse.model_validate({**star, "situation": "Slow ingest at 1234.6 ms constrained throughput."},
                                     context=ctx)
+
+
+def test_multiplier_reduction_is_rejected_but_speedup_is_fine():
+    with pytest.raises(ValidationError, match="multiplier misuse"):
+        _validate(_xyz(x="a 5.7x reduction in ledger ingest latency"))
+    assert "5.7x speedup" in _validate(_xyz(x="a 5.7x speedup in ledger ingest")).combined_xyz_bullet
+
+
+def test_star_rejects_single_sample_and_accepts_iteration_count():
+    ctx = validation_context(STATE, ALLOWED, "star", "standard")
+    star = {"situation": "Ledger ingest took 1234.6 ms averaged over 3 benchmark iterations.",
+            "task": "Reduce ingest latency.", "action": "Batched inserts with executemany.",
+            "result": "Mean latency fell to 216.0 ms, an 82.5% reduction.", "cited_numbers": [1234.6, 3, 216.0, 82.5]}
+    StarResponse.model_validate(star, context=ctx)
+    with pytest.raises(ValidationError, match="single sample"):
+        StarResponse.model_validate({**star, "result": star["result"] + " The measurement was a single sample."},
+                                    context=ctx)
+    with pytest.raises(ValidationError, match="multiplier misuse"):
+        StarResponse.model_validate({**star, "result": "Latency saw a 5.7x reduction."}, context=ctx)

@@ -109,9 +109,37 @@ NEGATED_REDUCTION_RE = re.compile(
     r"\b(reduc\w*|decreas\w*|drop\w*|cut\w*|fell|lower\w*|shrank|declin\w*)\s+(?:of|by)\s+-\s?\d", re.IGNORECASE)
 
 
+# "a 23.2x reduction" is a category error: multipliers pair with speedup/acceleration, % with reduction.
+MULTIPLIER_REDUCTION_RE = re.compile(
+    r"\b\d+(?:\.\d+)?\s?x\s+(reduction|decrease|drop|decline|cut|lower\w*|less)\b", re.IGNORECASE)
+SINGLE_SAMPLE_RE = re.compile(r"\b(single|one|1)\s+(sample|measurement)\b", re.IGNORECASE)
+
+
+def multiplier_misuse(text: str) -> list[str]:
+    return [m.group(0) for m in MULTIPLIER_REDUCTION_RE.finditer(text)]
+
+
+def single_sample_claims(text: str) -> list[str]:
+    return [m.group(0) for m in SINGLE_SAMPLE_RE.finditer(text)]
+
+
 def negated_reductions(text: str) -> list[str]:
     """'a reduction of -95.7%' is a double negative; reductions are stated as positive magnitudes."""
     return [m.group(0) for m in NEGATED_REDUCTION_RE.finditer(text)]
+
+
+# Words that claim a metric; a bullet may not use them when that metric is in `unmeasured_metrics`.
+METRIC_TERMS = {
+    "throughput_items_sec": ["throughput", "ops/sec", "items/sec", "requests per second"],
+    "peak_memory_mb": ["memory", "rss"],
+    "mean_latency_ms": ["latency"],
+    "speedup_multiplier_x": ["speedup"],
+    "cyclomatic_complexity": ["cyclomatic", "complexity"],
+}
+
+
+def unmeasured_terms(unmeasured_metrics: list[str]) -> list[str]:
+    return [term for metric in unmeasured_metrics for term in METRIC_TERMS.get(metric, [])]
 
 
 def unmeasured_claims(text: str, unmeasured: list[str]) -> list[str]:
@@ -127,6 +155,10 @@ def lint_xyz(x: str, z: str, combined: str, identifiers: set[str] | None,
     negated = negated_reductions(combined)
     if negated:
         problems.append(f"double negative {negated}; state reductions as positive magnitudes")
+    misused = multiplier_misuse(combined)
+    if misused:
+        problems.append(f"multiplier misuse {misused}: pair a multiplier with 'speedup'/'acceleration' "
+                        "(e.g. 'a 23.2x speedup') and a percentage with 'reduction'")
     claimed = unmeasured_claims(combined, unmeasured or [])
     if claimed:
         problems.append(f"bullet mentions {claimed} but that metric was not measured; describe only measured "

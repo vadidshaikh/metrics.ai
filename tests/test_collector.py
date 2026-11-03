@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
 import sys
+
+import pytest
 
 from metrics_ai import collector, profiler
 from metrics_ai.ast_diff import diff_profiles, identifiers, mechanisms, profile_source, structural_signals
@@ -77,18 +80,68 @@ def test_failed_runs_excluded_when_successes_exist():
     assert d["latency_delta_pct"] == -50.0
 
 
-def test_profile_command_measures_real_process():
-    cmd = f'"{sys.executable}" -c "x = bytearray(30 * 1024 * 1024); import time; time.sleep(0.2)"'
-    run = profiler.profile_command(cmd, runs=2)
-    assert run["exit_code"] == 0
-    assert run["mean_latency_ms"] >= 200.0
-    assert run["peak_memory_mb"] >= 30.0
-    assert len(run["raw_benchmark_json"]["runs"]) == 2
+class FakeProc:
+    """Deterministic stand-in for psutil.Popen: fixed RSS trace, exits after N polls."""
+
+    def __init__(self, rss_mb, exit_code=0, children_mb=()):
+        self.rss_mb, self.exit_code, self.polls = list(rss_mb), exit_code, 0
+        self.kids = [FakeChild(mb) for mb in children_mb]
+
+    def children(self, recursive=True):
+        return self.kids
+
+    def memory_info(self):
+        return type("Mem", (), {"rss": int(self.rss_mb[min(self.polls, len(self.rss_mb) - 1)] * profiler.MB)})()
+
+    def wait(self, timeout=None):
+        self.polls += 1
+        if self.polls < len(self.rss_mb):
+            raise profiler.psutil.TimeoutExpired(timeout)
+        return self.exit_code
 
 
-def test_profile_command_reports_exit_code():
-    run = profiler.profile_command('python -c "raise SystemExit(3)"', runs=1)
-    assert run["exit_code"] == 3
+class FakeChild:
+    def __init__(self, mb):
+        self.mb = mb
+
+    def memory_info(self):
+        return type("Mem", (), {"rss": int(self.mb * profiler.MB)})()
+
+
+def _fake_profiler(monkeypatch, procs, clock):
+    procs, ticks, seen = list(procs), iter(clock), {}
+
+    def popen(args, **kwargs):
+        seen.update(kwargs)
+        return procs.pop(0)
+    monkeypatch.setattr(profiler.psutil, "Popen", popen)
+    monkeypatch.setattr(profiler.time, "perf_counter", lambda: next(ticks))
+    return seen
+
+
+def test_profile_command_is_exact_with_mocked_psutil(monkeypatch, tmp_path):
+    (tmp_path / "src").mkdir()
+    seen = _fake_profiler(monkeypatch, [FakeProc([10, 30, 20], children_mb=[2]), FakeProc([5, 40])],
+                          clock=[0.0, 0.100, 1.0, 1.300])
+    run = profiler.profile_command("python bench.py", runs=2, cwd=tmp_path)
+    raw = run["raw_benchmark_json"]
+    assert raw["per_run_ms"] == pytest.approx([100.0, 300.0]) and run["mean_latency_ms"] == pytest.approx(200.0)
+    assert raw["per_run_mb"] == pytest.approx([32.0, 40.0]) and run["peak_memory_mb"] == pytest.approx(40.0)
+    assert raw["benchmark_iterations"] == 2 and run["exit_code"] == 0
+    # the profiled repo's own src/ is put first on the child's PYTHONPATH
+    assert seen["env"]["PYTHONPATH"].split(os.pathsep)[0] == str(tmp_path / "src")
+
+
+def test_profile_command_reports_first_failing_exit_code(monkeypatch):
+    _fake_profiler(monkeypatch, [FakeProc([1]), FakeProc([1], exit_code=3)], clock=[0.0, 0.01, 1.0, 1.01])
+    assert profiler.profile_command("python x.py", runs=2)["exit_code"] == 3
+
+
+def test_profile_command_real_process_smoke():
+    # Loose bounds only: real timings and RSS depend on machine load.
+    run = profiler.profile_command(f'"{sys.executable}" -c "raise SystemExit(0)"', runs=1)
+    assert run["exit_code"] == 0 and run["mean_latency_ms"] > 0 and run["peak_memory_mb"] >= 0
+    assert run["raw_benchmark_json"]["benchmark_iterations"] == 1
 
 
 def test_parse_benchmark_json():
@@ -118,3 +171,26 @@ def test_build_state_exposes_mechanisms_and_identifiers(repo):
     idents = collector.state_identifiers(state)
     assert {"executemany", "lru_cache", "ingest.py"} <= idents
     assert identifiers({}, ["a/b/long_name.py"]) == {"long_name.py", "long_name"}
+
+
+def test_iterations_replace_samples_and_are_citable_only_above_one():
+    raw3 = {"per_run_ms": [10.0, 11.0, 12.0], "per_run_mb": [5.0, 5.0, 5.0], "benchmark_iterations": 3}
+    legacy = '{"runs": [{"latency_ms": 1}, {"latency_ms": 2}, {"latency_ms": 3}]}'
+    runs3 = [{"mean_latency_ms": 11.0, "peak_memory_mb": 5.0, "exit_code": 0, "raw_benchmark_json": raw3}]
+    d = collector.compute_deltas(runs3, [{"mean_latency_ms": 5.0, "exit_code": 0, "raw_benchmark_json": legacy}],
+                                 2.0, 1.0)
+    assert "samples" not in d["baseline"] and d["baseline"]["benchmark_iterations"] == 3
+    assert d["target"]["benchmark_iterations"] == 3  # derived from a legacy `runs` list
+    state = make_state()
+    assert 3.0 in collector.allowed_numbers(state)
+    for side in ("baseline", "target"):
+        state["telemetry_delta"][side]["benchmark_iterations"] = 1
+    # With a single iteration, "1" must not become citable (no other value in this state equals 1).
+    assert 1.0 not in collector.allowed_numbers({**state, "complexity_delta": {"loc_delta": 0}})
+
+
+def test_metric_manifest_lists_unmeasured_throughput():
+    state = make_state()
+    assert state["unmeasured_metrics"] == ["throughput_items_sec"]
+    assert {"mean_latency_ms", "peak_memory_mb", "cyclomatic_complexity", "speedup_multiplier_x"} == \
+        set(state["measured_metrics"])

@@ -6,6 +6,7 @@ rounded to 1 decimal place, and every number is registered in `allowed_numbers`.
 
 from __future__ import annotations
 
+import json
 import statistics
 from pathlib import Path
 from typing import Any
@@ -108,6 +109,17 @@ def ratio(before: float | None, after: float | None) -> float | None:
     return round(before / after, 1)
 
 
+def benchmark_iterations(run: dict[str, Any]) -> int:
+    """How many timed iterations one telemetry row aggregates (`per_run_ms`, else legacy `runs`)."""
+    raw = run.get("raw_benchmark_json") or {}
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            raw = {}
+    return int(raw.get("benchmark_iterations") or len(raw.get("per_run_ms") or raw.get("runs") or []) or 1)
+
+
 def _aggregate(runs: list[dict[str, Any]]) -> dict[str, float | None]:
     ok = [r for r in runs if r.get("exit_code", 0) == 0] or runs
 
@@ -116,16 +128,18 @@ def _aggregate(runs: list[dict[str, Any]]) -> dict[str, float | None]:
         return statistics.fmean(vals) if vals else None
 
     return {"mean_latency_ms": mean("mean_latency_ms"), "peak_memory_mb": mean("peak_memory_mb"),
-            "throughput_items_sec": mean("throughput_items_sec"), "samples": len(ok)}
+            "throughput_items_sec": mean("throughput_items_sec"),
+            "benchmark_iterations": sum(benchmark_iterations(r) for r in ok) if ok else 0}
 
 
 def compute_deltas(base_runs: list[dict[str, Any]], tgt_runs: list[dict[str, Any]],
                    cc_before: float, cc_after: float) -> dict[str, Any]:
     b, t = _aggregate(base_runs), _aggregate(tgt_runs)
     r1 = lambda v: round(v, 1) if v is not None else None  # noqa: E731
+    keep = "benchmark_iterations"
     return {
-        "baseline": {k: r1(v) for k, v in b.items() if k != "samples"} | {"samples": b["samples"]},
-        "target": {k: r1(v) for k, v in t.items() if k != "samples"} | {"samples": t["samples"]},
+        "baseline": {k: (v if k == keep else r1(v)) for k, v in b.items()},
+        "target": {k: (v if k == keep else r1(v)) for k, v in t.items()},
         "latency_delta_pct": pct_delta(b["mean_latency_ms"], t["mean_latency_ms"]),
         "memory_delta_pct": pct_delta(b["peak_memory_mb"], t["peak_memory_mb"]),
         "throughput_delta_pct": pct_delta(b["throughput_items_sec"], t["throughput_items_sec"]),
@@ -144,8 +158,10 @@ def allowed_numbers(state: dict[str, Any]) -> set[float]:
 
     delta = state["telemetry_delta"]
     for side in ("baseline", "target"):
-        for value in delta[side].values():
-            add(value)
+        for key, value in delta[side].items():
+            # An iteration count is only a meaningful citation when it is more than one run.
+            if key != "benchmark_iterations" or (value or 0) > 1:
+                add(value)
     for key in ("latency_delta_pct", "memory_delta_pct", "throughput_delta_pct",
                 "speedup_multiplier_x", "complexity_delta_pct"):
         add(delta.get(key))
@@ -181,4 +197,21 @@ def build_state(commit: dict[str, Any], base_runs: list[dict[str, Any]],
         "telemetry_delta": compute_deltas(base_runs, tgt_runs, cc_b, cc_a),
     }
     state["complexity_delta"]["complexity_delta_pct"] = state["telemetry_delta"]["complexity_delta_pct"]
+    state["measured_metrics"], state["unmeasured_metrics"] = metric_manifest(state)
     return state
+
+
+METRIC_DELTAS = {
+    "mean_latency_ms": "latency_delta_pct",
+    "peak_memory_mb": "memory_delta_pct",
+    "throughput_items_sec": "throughput_delta_pct",
+    "cyclomatic_complexity": "complexity_delta_pct",
+    "speedup_multiplier_x": "speedup_multiplier_x",
+}
+
+
+def metric_manifest(state: dict[str, Any]) -> tuple[list[str], list[str]]:
+    """Which metrics have a computed delta (may be cited) and which do not (must never be claimed)."""
+    delta = state["telemetry_delta"]
+    measured = [m for m, key in METRIC_DELTAS.items() if delta.get(key) is not None]
+    return measured, [m for m in METRIC_DELTAS if m not in measured]

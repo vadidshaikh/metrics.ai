@@ -6,7 +6,7 @@ import json
 import re
 from typing import Any
 
-from metrics_ai.prose import prose_defects
+from metrics_ai.prose import prose_defects, unmeasured_claims, unmeasured_terms
 
 ROLE_KEYWORDS = {
     "aiml": ["torch", "tensorflow", "numpy", "embedding", "inference", "tensor", "sklearn",
@@ -103,6 +103,11 @@ def faithfulness(evidence: dict[str, Any], z_clause: str) -> float:
         return 0.80
     found = sum(1 for alts in claimed if any(a in haystack for a in alts))
     return round(0.97 * found / len(claimed), 3)
+
+
+def metric_accuracy(candidate: str, unmeasured_metrics: list[str]) -> float:
+    """Deterministic metric check: claiming any unmeasured metric fails."""
+    return 0.2 if unmeasured_claims(candidate, unmeasured_terms(unmeasured_metrics)) else 0.9
 
 
 def naturalness(candidate: str) -> tuple[float, str]:

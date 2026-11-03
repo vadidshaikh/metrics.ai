@@ -10,7 +10,7 @@ from rich.console import Console
 
 from metrics_ai import collector, config, model_router
 from metrics_ai.cli_render import artifact_panel, delta_table, triage_table
-from metrics_ai.decision_gate import DecisionGate, route_roles, weakest
+from metrics_ai.decision_gate import DecisionGate, GateUnavailable, route_roles, weakest
 from metrics_ai.llm_judge import LlmJudge
 from metrics_ai.renderers import render_pr_md
 from metrics_ai.storage import Ledger
@@ -35,11 +35,11 @@ def ensure_model(root: Path, cfg: dict[str, Any], console: Console) -> bool:
 
 
 def build_gate(root: Path, cfg: dict[str, Any], offline: bool, console: Console) -> DecisionGate:
-    api_key = config.get_secret(cfg, "jev_api_key")
-    judge = None
-    if not offline and not api_key and ensure_model(root, cfg, console):
-        judge = LlmJudge(cfg)
-    return DecisionGate(cfg, api_key, judge=judge, offline=offline)
+    """Tier 1 when a SystemOne key resolves (TypeSafe key wins, else OpenJev); the locked LLM is always
+    wired as the Tier-2 judge so an unreachable SystemOne endpoint degrades to `llm_judge`."""
+    endpoint, model, api_key, _label = config.jev_target(cfg)
+    judge = LlmJudge(cfg) if not offline and ensure_model(root, cfg, console) else None
+    return DecisionGate(cfg, api_key, judge=judge, offline=offline, endpoint=endpoint, model=model)
 
 
 def load_state(root: Path, ledger: Ledger, console: Console, commit: str, baseline: Optional[str],
@@ -67,7 +67,12 @@ def generate(root: Path, cfg: dict[str, Any], ledger: Ledger, console: Console, 
     console.print(delta_table(state))
 
     gate = build_gate(root, cfg, offline, console)
-    triage = gate.triage(state, jev_response=None if offline else jev_response)
+    try:
+        triage = gate.triage(state, jev_response=None if offline else jev_response)
+    except GateUnavailable as exc:
+        console.print(f"[red]Stage-1 gate unavailable:[/] {exc}")
+        console.print("Run `metrics auth` (SystemOne key or an LLM provider), or pass --offline-no-llm.")
+        return ["gate"]
     threshold = float(cfg["jev"]["worthy_threshold"])
     console.print(triage_table(triage, threshold))
     for note in triage.notes:
@@ -97,29 +102,33 @@ def generate(root: Path, cfg: dict[str, Any], ledger: Ledger, console: Console, 
         console.print("[red]No reachable LLM provider; cannot synthesize. Run `metrics auth`.[/]")
         return route_roles(triage.role_distribution, role)
 
-    failed = []
+    failed: list[str] = []
+    produced: dict[str, str] = {}  # role -> bullet, so later roles are not clones of earlier ones
     for target_role in route_roles(triage.role_distribution, role):
         try:
             result = synthesize(cfg, gate, state, allowed, fmt, target_role, density,
-                                log=lambda m: console.print(f"[dim]{m}[/]"))
-        except (SynthesisError, model_router.ProviderUnavailable) as exc:
+                                log=lambda m: console.print(f"[dim]{m}[/]"), others=produced)
+        except (SynthesisError, model_router.ProviderUnavailable, GateUnavailable) as exc:
             console.print(f"[red]{target_role}: {exc}[/]")
             failed.append(target_role)
             continue
+        review = result.review
+        produced[target_role] = result.structured.get("combined_xyz_bullet") or result.output_text
         digest = ledger_hash(state, result.output_text)
         structured = {**result.structured, "gate": {
-            "triage_mode": triage.gate_mode, "review_mode": result.gate_mode,
-            "faithful_prob": result.faithful_prob, "natural_prob": result.natural_prob,
-            "critique": result.critique, "attempts": result.attempts}}
+            "triage_mode": triage.gate_mode, "review_mode": review.gate_mode,
+            "faithful_prob": review.faithful_prob, "metric_prob": review.metric_prob,
+            "natural_prob": review.natural_prob, "critique": review.critique, "attempts": result.attempts}}
         ledger.insert_impact({**base_row, "role": target_role,
-                              "gate_mode": weakest(triage.gate_mode, result.gate_mode),
+                              "gate_mode": weakest(triage.gate_mode, review.gate_mode),
                               "jev_role_prob": triage.role_distribution.get(target_role),
-                              "jev_faithful_prob": result.faithful_prob, "provider_used": result.provider,
-                              "model_used": result.model, "output_text": result.output_text,
-                              "structured_json": structured, "ledger_hash": digest})
+                              "jev_faithful_prob": review.faithful_prob, "natural_prob": review.natural_prob,
+                              "provider_used": result.provider, "model_used": result.model,
+                              "output_text": result.output_text, "structured_json": structured, "ledger_hash": digest})
         console.print(artifact_panel(
             f"{fmt.upper()} · {target_role}", result.output_text,
-            f"{result.provider}/{result.model} · {result.gate_mode} faithful={result.faithful_prob:.2f} "
-            f"natural={result.natural_prob:.2f} · attempts={result.attempts} · hash={digest[:12]}"))
+            f"{result.provider}/{result.model} · {review.gate_mode} faithful={review.faithful_prob:.2f} "
+            f"metric={review.metric_prob:.2f} natural={review.natural_prob:.2f} · attempts={result.attempts} "
+            f"· hash={digest[:12]}"))
         console.print(json.dumps({"role": target_role, "cited_numbers": result.structured["cited_numbers"]}))
     return failed

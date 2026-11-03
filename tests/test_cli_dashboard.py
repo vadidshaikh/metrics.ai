@@ -55,7 +55,7 @@ def test_commands_require_init(repo, monkeypatch):
 
 def test_wrap_then_generate_pr_md(repo, monkeypatch):
     root = _wrap_both(repo, monkeypatch)
-    result = runner.invoke(app, ["generate", "--format", "pr-md"])
+    result = runner.invoke(app, ["generate", "--format", "pr-md", "--offline-no-llm"])
     assert result.exit_code == 0, result.output
     assert "| Mean latency (ms) |" in result.output and "#### AST summary" in result.output
     dump = Ledger(root / ".metrics" / "ledger.db").dump()
@@ -79,12 +79,14 @@ def test_generate_halts_below_gate_and_logs(repo, monkeypatch):
     assert impact["gate_mode"] == "offline_heuristic"
 
 
-def test_generate_without_any_provider_falls_back_to_offline_gate(repo, monkeypatch):
+def test_generate_without_any_gate_refuses_instead_of_silently_using_heuristics(repo, monkeypatch):
     root = _wrap_both(repo, monkeypatch)
     result = runner.invoke(app, ["generate", "--format", "pr-md"])
-    assert result.exit_code == 0, result.output
-    assert "gate_mode: offline_heuristic" in result.output
-    assert Ledger(root / ".metrics" / "ledger.db").dump()["synthesized_impacts"][0]["gate_mode"] == "offline_heuristic"
+    assert result.exit_code == 1
+    assert "Stage-1 gate unavailable" in result.output and "--offline-no-llm" in result.output
+    assert Ledger(root / ".metrics" / "ledger.db").dump()["synthesized_impacts"] == []
+    offline = runner.invoke(app, ["generate", "--format", "pr-md", "--offline-no-llm"])
+    assert offline.exit_code == 0 and "gate_mode: offline_heuristic" in offline.output
 
 
 def test_prune_command(repo, monkeypatch):

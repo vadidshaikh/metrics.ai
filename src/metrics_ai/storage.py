@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS synthesized_impacts (
     jev_impact_score  REAL,
     jev_role_prob     REAL,
     jev_faithful_prob REAL,
+    natural_prob      REAL,
     provider_used     TEXT,
     model_used        TEXT,
     output_text       TEXT,
@@ -74,9 +75,12 @@ RUN_COLUMNS = (
 )
 IMPACT_COLUMNS = (
     "event_id", "baseline_sha", "target_sha", "role", "format_type", "density", "gate_mode",
-    "jev_worth_prob", "jev_impact_score", "jev_role_prob", "jev_faithful_prob",
+    "jev_worth_prob", "jev_impact_score", "jev_role_prob", "jev_faithful_prob", "natural_prob",
     "provider_used", "model_used", "output_text", "structured_json", "ledger_hash", "created_at",
 )
+
+
+ADDED_IMPACT_COLUMNS = {"gate_mode": "TEXT", "natural_prob": "REAL"}
 
 
 class Ledger:
@@ -100,10 +104,11 @@ class Ledger:
     def init_schema(self) -> None:
         with self.connect() as conn:
             conn.executescript(SCHEMA)
-            # Migrate ledgers created before `gate_mode` existed.
+            # Migrate ledgers created before these columns existed.
             cols = {r["name"] for r in conn.execute("PRAGMA table_info(synthesized_impacts)")}
-            if "gate_mode" not in cols:
-                conn.execute("ALTER TABLE synthesized_impacts ADD COLUMN gate_mode TEXT")
+            for name, sql_type in ADDED_IMPACT_COLUMNS.items():
+                if name not in cols:
+                    conn.execute(f"ALTER TABLE synthesized_impacts ADD COLUMN {name} {sql_type}")
 
     # -- commits ---------------------------------------------------------
     def upsert_commit(self, record: dict[str, Any]) -> None:
