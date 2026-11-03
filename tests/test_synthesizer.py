@@ -221,14 +221,19 @@ def test_prompt_shows_other_roles_bullets():
 
 
 def test_synthesize_fails_over_after_exhausting_retries():
+    from metrics_ai.synthesizer import MAX_GUARD_RETRIES
+
     bad = json.dumps(_xyz(x=X.replace("82.5%", "83%")))
-    result = _run(FakeChat([bad] * 4 + [json.dumps(_xyz())]), n_models=2)
-    assert result.model == "model-1" and result.attempts == 5
+    per_model = MAX_GUARD_RETRIES + 1
+    result = _run(FakeChat([bad] * per_model + [json.dumps(_xyz())]), n_models=2)
+    assert result.model == "model-1" and result.attempts == per_model + 1
 
 
 def test_synthesize_raises_when_every_model_fails():
+    from metrics_ai.synthesizer import MAX_GUARD_RETRIES
+
     with pytest.raises(SynthesisError):
-        _run(FakeChat(["not json"] * 4))
+        _run(FakeChat(["not json"] * (MAX_GUARD_RETRIES + 1)))
 
 
 def test_pr_markdown_and_ledger_hash():
@@ -383,3 +388,15 @@ def test_headline_numbers_and_z_leads_are_partitioned_across_roles():
         obj = _validate(_xyz(x="a 5.7x ingest benchmark speedup", y=mlops_y, z=z))
         assert (not lens_violations("mlops", obj.x_accomplishment, obj.z_mechanism, obj.combined_xyz_bullet,
                                     state)) is ok
+
+
+def test_vague_intensifiers_and_tpm_framing_are_kept_out_of_other_roles_x():
+    from metrics_ai.synthesizer import lens_violations
+
+    def violations(role, x):
+        obj = _validate(_xyz(x=x, z="caching parsed source with lru_cache and batching inserts via executemany"))
+        return lens_violations(role, obj.x_accomplishment, obj.z_mechanism, obj.combined_xyz_bullet, STATE)
+
+    assert any("vague intensifier" in v for v in violations("aiml", "a major AST-parsing speedup"))
+    assert any("tpm framing" in v for v in violations("aiml", "a reduction in AST-parsing latency"))
+    assert not violations("aiml", "a memoized AST-parsing stage with no redundant per-record parses")

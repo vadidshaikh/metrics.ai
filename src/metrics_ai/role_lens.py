@@ -13,18 +13,23 @@ CLONE_LIMITS = {"x": 0.70, "z": 0.70, "text": 0.80}
 ROLE_LENS = {
     "aiml": "an AI/ML engineer. Lead with the data-processing side: caching or memoizing repeated parsing / "
             "feature extraction and removing redundant per-record work. [X] names the parsing/profiling "
-            "component and its outcome WITHOUT a headline number (the numbers go in [Y]).",
+            "component and its outcome WITHOUT a headline number, shaped like 'a memoized <component> profiling "
+            "stage with no redundant per-record parses' (the numbers go in [Y]).",
     "backend": "a backend engineer. Lead with persistence architecture: batched/bulk database writes in one "
-               "transaction replacing per-row writes. [X] names the storage/write path and its outcome WITHOUT "
-               "a headline number (the numbers go in [Y]).",
+               "transaction replacing per-row writes. [X] names the storage/write path WITHOUT a headline "
+               "number, shaped like 'a single-transaction <storage> write path' (the numbers go in [Y]).",
     "mlops": "an MLOps/platform engineer. Lead with the profiled benchmark runtime: the speedup multiplier "
              "together with the peak-memory (RSS) change; [Z] leads with the per-iteration overhead removed "
-             "from the hot loop. [X] names the benchmark.",
+             "from the hot loop. [X] is shaped like 'a <multiplier> <benchmark> speedup'.",
     "tpm": "a technical program manager. Lead with the end-to-end outcome: the latency reduction percentage "
-           "with its before/after values, framed as delivery impact and maintainability. [X] names the "
-           "end-to-end workflow. Never claim an SLA, target or deadline was defined or met; none is in the data.",
+           "with its before/after values, framed as delivery impact and maintainability. [X] is shaped like "
+           "'a <percent> cut in end-to-end <workflow> latency'. Never claim an SLA, target or deadline was "
+           "defined or met; none is in the data.",
 }
 
+VAGUE_RE = re.compile(r"\b(major|significant\w*|dramatic\w*|massive\w*|huge|substantial\w*|tremendous\w*|"
+                      r"drastic\w*|remarkabl\w*|impressive\w*)\b", re.IGNORECASE)
+TPM_FRAMING_RE = re.compile(r"\b(reduction|decrease|drop|cut|decline)\b.*\blatency\b", re.IGNORECASE)
 SLA_CLAIM_RE = re.compile(r"\b(meet|meets|meeting|met|hit|hitting|achiev\w*)\s+(an?\s+|the\s+)?(sla|slo|target)",
                           re.IGNORECASE)
 
@@ -113,6 +118,11 @@ def lens_requirements(role: str, state: dict[str, Any]) -> list[tuple[str, Calla
         headline = f"{fmt_number(abs(delta['latency_delta_pct']))}%"
         reqs.append((f"[X] does not use the '{headline}' latency figure (reserved for the tpm bullet); name the "
                      "component and its outcome instead", lambda x, z, c: headline not in x))
+    reqs.append(("[X] uses no vague intensifier (major, significant, dramatic...); the numbers speak",
+                 lambda x, z, c: not VAGUE_RE.search(x)))
+    if role in ("aiml", "backend"):
+        reqs.append(("[X] avoids the tpm framing '<reduction/decrease/drop/cut> ... latency'; name the component",
+                     lambda x, z, c: not TPM_FRAMING_RE.search(x)))
     hoisted = diff.get("calls_hoisted_out_of_loops", [])
     if role == "mlops" and hoisted:
         reqs.append((f"[Z]'s FIRST clause is the loop-hoisting change, naming {' or '.join(hoisted)}",

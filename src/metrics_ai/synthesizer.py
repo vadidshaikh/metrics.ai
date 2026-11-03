@@ -19,7 +19,7 @@ from metrics_ai.role_lens import (CLONE_LIMITS, ROLE_LENS, _ratio, clone_key, fm
                                   lens_requirements, lens_violations, too_similar)
 from metrics_ai.schemas import DENSITY_RANGES, StarResponse, XyzResponse
 
-MAX_GUARD_RETRIES = 3
+MAX_GUARD_RETRIES = 4  # later roles in --role all must also dodge every earlier role's X/Z
 MAX_REVIEW_RETRIES = 2
 XYZ_OVERHEAD = len("Accomplished  as measured by , by .")
 
