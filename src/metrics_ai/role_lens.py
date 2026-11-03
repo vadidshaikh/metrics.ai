@@ -6,6 +6,8 @@ import difflib
 import re
 from typing import Any, Callable
 
+from metrics_ai.prose import mechanisms_referenced
+
 # Within one run, a role's [X] and [Z] must each stay below this similarity to every other role's.
 CLONE_LIMITS = {"x": 0.70, "z": 0.70, "text": 0.80}
 
@@ -147,6 +149,11 @@ def lens_requirements(role: str, state: dict[str, Any]) -> list[tuple[str, Calla
             reqs.append((f"cite the peak-memory change as '{pct}%' or '{mb} MB' (e.g. in [Y]: '... with peak RSS "
                          f"down {pct}%')", lambda x, z, c: _has_number(c, pct) or _has_number(c, mb)))
     elif role == "tpm":
+        mechanisms = list(diff.get("mechanisms", []))
+        if len(mechanisms) >= 2:
+            reqs.append((f"[Z] summarizes ALL {len(mechanisms)} MECHANISMS as one parallel list (the delivery view; "
+                         "no other role covers every change)",
+                         lambda x, z, c: mechanisms_referenced(z, mechanisms) == len(mechanisms)))
         if delta.get("latency_delta_pct") is not None:
             pct = f"{fmt_number(abs(delta['latency_delta_pct']))}%"
             reqs.append((f"[X] contains the end-to-end '{pct}' latency reduction", lambda x, z, c: pct in x))

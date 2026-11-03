@@ -198,9 +198,10 @@ def test_synthesize_rejects_a_clone_of_another_roles_bullet():
     from metrics_ai.synthesizer import _ratio
 
     first = _validate(_xyz())
-    same_x_new_z = _xyz(z="consolidating per-row commits into one executemany transaction")
+    new_z = "consolidating per-row commits into one executemany call while memoizing parses via lru_cache"
+    same_x_new_z = _xyz(z=new_z)
     distinct = _xyz(x="an 82.5% cut in end-to-end ingestion time",
-                    z="consolidating per-row commits into one executemany transaction", cited=(1234.6, 216.0))
+                    z=new_z, cited=(1234.6, 216.0))
     chat = FakeChat([json.dumps(_xyz()), json.dumps(same_x_new_z), json.dumps(distinct)])
     result = _run(chat, role="tpm", others={"aiml": clone_key(first.model_dump())})
     assert result.attempts == 3
@@ -413,3 +414,14 @@ def test_prompt_has_part_budgets_and_no_example_numbers():
     task = _xyz_task("standard")
     # Only the budgets/density bounds may appear as digits; no example metric values to copy.
     assert not _re.search(r"\d+(\.\d+)?\s*(%|x\b|ms\b)", task + SYSTEM_PROMPT)
+
+
+def test_tpm_z_must_cover_every_mechanism():
+    from metrics_ai.synthesizer import lens_violations
+
+    both = "batching inserts via executemany and caching parsed source with lru_cache"
+    one = "batching SQLite inserts into one transaction via executemany"
+    for z, ok in ((both, True), (one, False)):
+        obj = _validate(_xyz(z=z))
+        assert (not lens_violations("tpm", obj.x_accomplishment, obj.z_mechanism, obj.combined_xyz_bullet,
+                                    STATE)) is ok
