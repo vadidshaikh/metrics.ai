@@ -41,7 +41,9 @@ def clone_key(structured: dict[str, Any]) -> dict[str, str]:
 
 
 def _ratio(a: str, b: str) -> float:
-    return difflib.SequenceMatcher(None, a.lower(), b.lower()).ratio()
+    """Symmetric similarity: SequenceMatcher.ratio() depends on argument order, so take the larger."""
+    a, b = a.lower(), b.lower()
+    return max(difflib.SequenceMatcher(None, a, b).ratio(), difflib.SequenceMatcher(None, b, a).ratio())
 
 
 def too_similar(parts: dict[str, str], others: dict[str, dict[str, str]]) -> tuple[str, str, float] | None:

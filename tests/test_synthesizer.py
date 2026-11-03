@@ -351,3 +351,16 @@ def test_gerund_may_not_echo_the_identifier_stem():
     assert stem_echoes("memoizing cached_profile results with lru_cache", idents) == []
     with pytest.raises(ValidationError, match="repeats the identifier's stem"):
         _validate(_xyz(z="executing executemany for bulk inserts and caching parses with lru_cache"))
+
+
+def test_similarity_is_symmetric_so_role_order_cannot_hide_a_clone():
+    import difflib
+
+    from metrics_ai.role_lens import _ratio, too_similar
+
+    # A real pair from the dogfood run where SequenceMatcher disagreed with itself by argument order.
+    a, b = "a 95.9% reduction in profiling latency", "a 95.9% reduction in end-to-end workflow latency"
+    forward, backward = (difflib.SequenceMatcher(None, s, t).ratio() for s, t in ((a, b), (b, a)))
+    assert forward != backward and _ratio(a, b) == _ratio(b, a) == max(forward, backward) >= 0.70
+    z = "batching writes via executemany"
+    assert too_similar({"x": b, "z": z + " and hoisting calls"}, {"aiml": {"x": a, "z": "memoizing parses"}})
