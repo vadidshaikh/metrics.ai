@@ -13,12 +13,13 @@ CLONE_LIMITS = {"x": 0.70, "z": 0.70, "text": 0.80}
 ROLE_LENS = {
     "aiml": "an AI/ML engineer. Lead with the data-processing side: caching or memoizing repeated parsing / "
             "feature extraction and removing redundant per-record work. [X] names the parsing/profiling "
-            "pipeline component that got faster.",
+            "component and its outcome WITHOUT a headline number (the numbers go in [Y]).",
     "backend": "a backend engineer. Lead with persistence architecture: batched/bulk database writes in one "
-               "transaction replacing per-row writes, and hoisting loop-invariant calls. [X] names the "
-               "storage/write path that got faster.",
+               "transaction replacing per-row writes. [X] names the storage/write path and its outcome WITHOUT "
+               "a headline number (the numbers go in [Y]).",
     "mlops": "an MLOps/platform engineer. Lead with the profiled benchmark runtime: the speedup multiplier "
-             "together with the peak-memory (RSS) change and the complexity trend. [X] names the benchmark.",
+             "together with the peak-memory (RSS) change; [Z] leads with the per-iteration overhead removed "
+             "from the hot loop. [X] names the benchmark.",
     "tpm": "a technical program manager. Lead with the end-to-end outcome: the latency reduction percentage "
            "with its before/after values, framed as delivery impact and maintainability. [X] names the "
            "end-to-end workflow. Never claim an SLA, target or deadline was defined or met; none is in the data.",
@@ -103,9 +104,19 @@ def lens_requirements(role: str, state: dict[str, Any]) -> list[tuple[str, Calla
         words = X_COMPONENTS[role]
         reqs.append((f"[X] names the {role} component (a word like: {', '.join(words[:4])})",
                      lambda x, z, c: any(w in x.lower() for w in words)))
+    # Headline numbers are partitioned so [X] differs by construction: mlops owns the multiplier, tpm owns the
+    # latency %, and aiml/backend lead with their component instead (the numbers still appear in [Y]).
     if speedup and role in ("aiml", "backend", "tpm"):
         reqs.append((f"[X] does not use the '{speedup}' multiplier (reserved for the mlops bullet)",
                      lambda x, z, c: speedup not in x.lower()))
+    if delta.get("latency_delta_pct") is not None and role in ("aiml", "backend"):
+        headline = f"{fmt_number(abs(delta['latency_delta_pct']))}%"
+        reqs.append((f"[X] does not use the '{headline}' latency figure (reserved for the tpm bullet); name the "
+                     "component and its outcome instead", lambda x, z, c: headline not in x))
+    hoisted = diff.get("calls_hoisted_out_of_loops", [])
+    if role == "mlops" and hoisted:
+        reqs.append((f"[Z]'s FIRST clause is the loop-hoisting change, naming {' or '.join(hoisted)}",
+                     lambda x, z, c: any(h.lower() in _first_clause(z) for h in hoisted)))
     if role == "aiml":
         caching = sorted(set(diff.get("caching_decorators_added", [])) | {
             d.split("::")[-1].split("@")[0].split(".")[-1] for d in diff.get("decorators_added", [])})

@@ -145,7 +145,7 @@ def _cfg(n_models=1):
     return cfg
 
 
-def _run(chat, n_models=1, gate=None, role="backend", others=None):
+def _run(chat, n_models=1, gate=None, role="tpm", others=None):
     return synthesize(_cfg(n_models), gate or DecisionGate(DEFAULT_CONFIG, offline=True), STATE, ALLOWED, "xyz",
                       role, "standard", chat=chat, others=others)
 
@@ -186,8 +186,8 @@ def test_synthesize_reprompts_with_diagnostic_review_critique():
 
     gate = MetricWrongOnce()
     chat = FakeChat([json.dumps(_xyz()), json.dumps(_xyz())])
-    result = _run(chat, gate=gate, role="backend")
-    assert result.attempts == 2 and result.review.metric_prob == 0.93 and gate.calls == ["backend", "backend"]
+    result = _run(chat, gate=gate, role="tpm")
+    assert result.attempts == 2 and result.review.metric_prob == 0.93 and gate.calls == ["tpm", "tpm"]
     feedback = chat.calls[1][-1]["content"]
     assert "metric=0.20" in feedback and "METRICS:" in feedback and "FLUENCY" not in feedback
 
@@ -199,10 +199,10 @@ def test_synthesize_rejects_a_clone_of_another_roles_bullet():
 
     first = _validate(_xyz())
     same_x_new_z = _xyz(z="consolidating per-row commits into one executemany transaction")
-    distinct = _xyz(x="a leaner SQLite storage write path",
+    distinct = _xyz(x="an 82.5% cut in end-to-end ingestion time",
                     z="consolidating per-row commits into one executemany transaction", cited=(1234.6, 216.0))
     chat = FakeChat([json.dumps(_xyz()), json.dumps(same_x_new_z), json.dumps(distinct)])
-    result = _run(chat, role="backend", others={"aiml": clone_key(first.model_dump())})
+    result = _run(chat, role="tpm", others={"aiml": clone_key(first.model_dump())})
     assert result.attempts == 3
     assert "[Z] is 100% similar to the aiml [Z]" in chat.calls[1][-1]["content"] or \
         "[X] is 100% similar to the aiml [X]" in chat.calls[1][-1]["content"]
@@ -297,15 +297,17 @@ def test_role_lenses_are_data_driven_and_check_what_z_leads_with():
         return obj.x_accomplishment, obj.z_mechanism, obj.combined_xyz_bullet
 
     cache_first = "caching parsed source with lru_cache and batching inserts via executemany"
-    aiml_x = "an 82.5% cut in AST-parsing ingest latency"
+    aiml_x = "a leaner AST-parsing ingest pipeline"
+    backend_x = "a single-transaction ledger write path"
     assert lens_violations("aiml", *bullet(x=aiml_x), STATE)                 # Z leads with batching, not caching
     assert not lens_violations("aiml", *bullet(x=aiml_x, z=cache_first), STATE)
     assert lens_violations("aiml", *bullet(z=cache_first), STATE)            # X names no parsing/profiling component
     assert lens_violations("aiml", *bullet(x="a 5.7x AST-parsing speedup", z=cache_first), STATE)  # mlops' multiplier
-    assert not lens_violations("backend", *bullet(), STATE)                  # X says ledger; Z leads with executemany
-    assert lens_violations("backend", *bullet(z=cache_first), STATE)
+    assert not lens_violations("backend", *bullet(x=backend_x), STATE)      # X names the write path; Z leads batching
+    assert lens_violations("backend", *bullet(), STATE)                      # X uses the % reserved for tpm
+    assert lens_violations("backend", *bullet(x=backend_x, z=cache_first), STATE)
     # Units: measured latency values must carry "ms".
-    assert lens_violations("backend", *bullet(y="mean latency falling from 1234.6 to 216.0"), STATE)
+    assert lens_violations("backend", *bullet(x=backend_x, y="mean latency falling from 1234.6 to 216.0"), STATE)
     assert lens_violations("mlops", *bullet(), STATE)                        # X lacks the 5.7x speedup
     mlops = bullet(x="a 5.7x ingest benchmark speedup", y="latency falling from 1234.6 ms to 216.0 ms "
                    "with peak RSS 17.1% lower", z="caching parses with lru_cache and batching via executemany")
@@ -364,3 +366,20 @@ def test_similarity_is_symmetric_so_role_order_cannot_hide_a_clone():
     assert forward != backward and _ratio(a, b) == _ratio(b, a) == max(forward, backward) >= 0.70
     z = "batching writes via executemany"
     assert too_similar({"x": b, "z": z + " and hoisting calls"}, {"aiml": {"x": a, "z": "memoizing parses"}})
+
+
+def test_headline_numbers_and_z_leads_are_partitioned_across_roles():
+    from metrics_ai.synthesizer import lens_violations
+
+    state = copy.deepcopy(STATE)
+    state["ast_structural_diff"]["calls_hoisted_out_of_loops"] = ["insert_run"]
+    cache_first = "caching parsed source with lru_cache and batching inserts via executemany"
+    aiml = _validate(_xyz(x="an 82.5% cut in AST-parsing time", z=cache_first))
+    assert any("reserved for the tpm bullet" in v for v in lens_violations(
+        "aiml", aiml.x_accomplishment, aiml.z_mechanism, aiml.combined_xyz_bullet, state))
+    mlops_y = "latency falling from 1234.6 ms to 216.0 ms with peak RSS 17.1% lower"
+    hoist_first = "hoisting insert_run calls out of the loop and batching inserts via executemany"
+    for z, ok in ((cache_first, False), (hoist_first, True)):
+        obj = _validate(_xyz(x="a 5.7x ingest benchmark speedup", y=mlops_y, z=z))
+        assert (not lens_violations("mlops", obj.x_accomplishment, obj.z_mechanism, obj.combined_xyz_bullet,
+                                    state)) is ok
