@@ -13,8 +13,8 @@ CLONE_LIMITS = {"x": 0.70, "z": 0.70, "text": 0.80}
 ROLE_LENS = {
     "aiml": "an AI/ML engineer. Lead with the data-processing side: caching or memoizing repeated parsing / "
             "feature extraction and removing redundant per-record work. [X] names the parsing/profiling "
-            "component and its outcome WITHOUT a headline number, shaped like 'a memoized <component> profiling "
-            "stage with no redundant per-record parses' (the numbers go in [Y]).",
+            "component WITHOUT a headline number, shaped like 'a memoized <component> stage' (the numbers go "
+            "in [Y]).",
     "backend": "a backend engineer. Lead with persistence architecture: batched/bulk database writes in one "
                "transaction replacing per-row writes. [X] names the storage/write path WITHOUT a headline "
                "number, shaped like 'a single-transaction <storage> write path' (the numbers go in [Y]).",

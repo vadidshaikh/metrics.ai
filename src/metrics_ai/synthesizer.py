@@ -27,11 +27,11 @@ SYSTEM_PROMPT = """You convert measured engineering telemetry into resume/interv
 HARD RULES:
 1. Use ONLY numbers listed in ALLOWED_NUMBERS, written exactly as listed (same decimals). Never round,
    never compute new percentages or ratios, never add counts, versions, dates or years.
-2. Write numbers without thousands separators. Multipliers (e.g. 4.2x) pair only with speedup /
-   acceleration ("a 4.2x speedup"); percentages pair with reduction / drop. Never "4.2x reduction".
+2. Write numbers without thousands separators. Multipliers ("<N>x") pair only with speedup /
+   acceleration ("a <N>x speedup"); percentages pair with reduction / drop. Never "<N>x reduction".
 3. Every library, database, algorithm or mechanism you mention must appear in AST_DIFF or FILES.
 4. Write fluent executive English: parallel structure, no stacked prepositions, no run-ons.
-   State reductions as positive magnitudes ("a 95.7% reduction"), never "-95.7%".
+   State reductions as positive magnitudes ("a <P>% reduction"), never with a minus sign.
    Mention only MEASURED_METRICS; never any of UNMEASURED_METRICS. Never draw a conclusion the numbers
    contradict (a positive loc_delta means the code grew).
 5. Respond with a single JSON object and nothing else."""
@@ -55,17 +55,29 @@ class SynthesisResult:
     errors: list[str] = field(default_factory=list)
 
 
+def part_budgets(density: str) -> tuple[int, int, int]:
+    """Max characters for [X], [Y], [Z] so the assembled sentence fits the density window (roughly 1:1.4:1.7)."""
+    room = DENSITY_RANGES[density][1] - XYZ_OVERHEAD
+    x = room * 10 // 41
+    y = room * 14 // 41
+    return x, y, room - x - y
+
+
 def _xyz_task(density: str) -> str:
+    # Placeholders only: example numbers in a prompt get copied by small models and then rejected.
     lo, hi = DENSITY_RANGES[density]
+    bx, by, bz = part_budgets(density)
     return (
         "Write one Google XYZ resume bullet as three parts; Python assembles them as\n"
         "  'Accomplished {x_accomplishment} as measured by {y_measurement}, by {z_mechanism}.'\n"
-        "- x_accomplishment: a NOUN PHRASE naming the component/system and its impact (e.g. 'a 95.3% "
-        "reduction in ingest latency' or 'a 4.2x benchmark speedup'); no leading verb, no 'Accomplished'.\n"
+        "- x_accomplishment: a NOUN PHRASE naming the component/system and its impact, shaped as ROLE_LENS "
+        f"says; no leading verb, no 'Accomplished'. At most {bx} characters.\n"
         "- y_measurement: a NOUN PHRASE giving the before-and-after measurement (e.g. 'mean latency dropping "
-        "from A ms to B ms'); no finite verbs like 'fell'/'was'; do not start with 'as measured by'.\n"
+        "from <A> ms to <B> ms'); no finite verbs like 'fell'/'was'; do not start with 'as measured by'. "
+        f"At most {by} characters.\n"
         "- z_mechanism: starts with a lowercase gerund verb (e.g. 'batching ...'); never start with 'by' or "
-        "'doing'. Write each MECHANISMS item you use as its own parallel gerund clause, joined with 'and'.\n"
+        "'doing'. Write each MECHANISMS item you use as its own parallel gerund clause, joined with 'and'. "
+        f"At most {bz} characters.\n"
         "- Name at least one exact identifier from IDENTIFIERS, written plainly (no '()' or '@'). Do not "
         "repeat the same number in X and Y.\n"
         f"- The assembled sentence MUST be {lo}-{hi} characters, so the three parts together need "

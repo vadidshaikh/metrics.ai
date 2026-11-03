@@ -400,3 +400,16 @@ def test_vague_intensifiers_and_tpm_framing_are_kept_out_of_other_roles_x():
     assert any("vague intensifier" in v for v in violations("aiml", "a major AST-parsing speedup"))
     assert any("tpm framing" in v for v in violations("aiml", "a reduction in AST-parsing latency"))
     assert not violations("aiml", "a memoized AST-parsing stage with no redundant per-record parses")
+
+
+def test_prompt_has_part_budgets_and_no_example_numbers():
+    import re as _re
+
+    from metrics_ai.schemas import DENSITY_RANGES
+    from metrics_ai.synthesizer import SYSTEM_PROMPT, XYZ_OVERHEAD, _xyz_task, part_budgets
+
+    for density, (lo, hi) in DENSITY_RANGES.items():
+        assert sum(part_budgets(density)) == hi - XYZ_OVERHEAD
+    task = _xyz_task("standard")
+    # Only the budgets/density bounds may appear as digits; no example metric values to copy.
+    assert not _re.search(r"\d+(\.\d+)?\s*(%|x\b|ms\b)", task + SYSTEM_PROMPT)
