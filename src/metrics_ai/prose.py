@@ -148,10 +148,42 @@ def unmeasured_claims(text: str, unmeasured: list[str]) -> list[str]:
     return [term for term in unmeasured if re.search(rf"\b{re.escape(term)}\b", lowered)]
 
 
+FILLER = {"a", "an", "the", "in", "of", "from", "to", "with", "by", "and", "on", "for", "ms", "mb", "x"}
+
+
+def _bigrams(text: str) -> set[tuple[str, str]]:
+    words = [w for w in re.findall(r"[a-z_]+", text.lower()) if w not in FILLER]
+    return set(zip(words, words[1:]))
+
+
+def repeated_phrases(x: str, y: str) -> list[str]:
+    """Content bigrams shared by [X] and [Y] ("reduction in mean latency as measured by mean latency")."""
+    return sorted(" ".join(b) for b in _bigrams(x) & _bigrams(y))
+
+
+def bare_identifier_objects(z: str, identifiers: set[str]) -> list[str]:
+    """Gerunds whose direct object is a bare code identifier ("batching executemany")."""
+    idents = {i.lower() for i in identifiers}
+    hits = []
+    for clause in re.split(r",|\band\b|\bwhile\b", z):
+        words = clause.split()
+        if len(words) >= 2 and words[0].lower().endswith("ing") and words[1].lower().strip(".") in idents:
+            hits.append(f"{words[0]} {words[1]}")
+    return hits
+
+
 def lint_xyz(x: str, z: str, combined: str, identifiers: set[str] | None,
              mechanisms: list[str], y: str = "", unmeasured: list[str] | None = None) -> list[str]:
     """Return human-readable defects; an empty list means the bullet is accepted."""
     problems = []
+    repeated = repeated_phrases(x, y)
+    if repeated:
+        problems.append(f"[X] and [Y] repeat {repeated}: X names the component and impact, Y the before/after "
+                        "measurement; don't restate the same metric phrase")
+    bare = bare_identifier_objects(z, identifiers or set())
+    if bare:
+        problems.append(f"{bare}: give the gerund a real object and attach the identifier with 'via'/'with' "
+                        "(e.g. 'batching writes via executemany')")
     negated = negated_reductions(combined)
     if negated:
         problems.append(f"double negative {negated}; state reductions as positive magnitudes")

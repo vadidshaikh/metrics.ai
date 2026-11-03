@@ -294,3 +294,17 @@ def test_role_lenses_are_data_driven_and_check_what_z_leads_with():
     # The requirements reach the prompt with values computed from the state, never hardcoded.
     content = build_messages(STATE, ALLOWED, "xyz", "mlops", "standard")[1]["content"]
     assert "'5.7x' speedup" in content and "'17.1%' or '40 MB'" in content
+
+
+def test_redundant_x_y_and_bare_identifier_objects_are_rejected():
+    from metrics_ai.prose import bare_identifier_objects, repeated_phrases
+
+    assert repeated_phrases("a 95.6% reduction in mean latency", "mean latency from 3688.1 ms to 161.2 ms") == \
+        ["mean latency"]
+    assert repeated_phrases("a 95.6% reduction in ingest latency", "mean latency dropping from A to B") == []
+    assert bare_identifier_objects("batching executemany, and caching results with lru_cache",
+                                   {"executemany", "lru_cache"}) == ["batching executemany"]
+    with pytest.raises(ValidationError, match="repeat"):
+        _validate(_xyz(x="an 82.5% reduction in mean latency", y="mean latency falling from 1234.6 ms to 216.0 ms"))
+    with pytest.raises(ValidationError, match="batching executemany"):
+        _validate(_xyz(z="batching executemany and caching parsed source with lru_cache"))
