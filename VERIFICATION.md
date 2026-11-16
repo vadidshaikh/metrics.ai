@@ -1,5 +1,11 @@
 # VERIFICATION — clean live dogfooding of `metrics.ai` on its own repository
 
+> **Status note (2026-11-16):** this record covers the run at `626a20a`. Later commits (`630222f` →
+> `aef775f`) add full commit capture on `wrap`, a Stage-3 judge that never reviews its own model's output,
+> and `[X]`/`[Z]` kept under 70% similarity across roles. They are covered by the unit suite (131 tests,
+> 5/5 consecutive green runs), but their live end-to-end re-run is **pending**: the last attempt was blocked
+> by Groq free-tier token-per-minute limits. This file will be regenerated from that run.
+
 This is the proof record for the Section 8 protocol, run on 2026-11-03. Every number comes from
 `.metrics/ledger.db` (git-ignored) after a `metrics prune --all` reset. Terminal blocks are the captured
 output, pasted verbatim (Pydantic's documentation-link lines are omitted).
